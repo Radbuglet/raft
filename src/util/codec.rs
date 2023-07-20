@@ -34,8 +34,8 @@ impl<'a> ByteReadSession<'a> {
         &self.bytes
     }
 
-    pub fn cursor(&self) -> ByteCursor<'_> {
-        ByteCursor::new(&self.bytes)
+    pub fn cursor(&self) -> ByteReadCursor<'_> {
+        ByteReadCursor::new(&self.bytes)
     }
 
     pub fn reserve(&self, additional: usize) {
@@ -57,7 +57,7 @@ impl<'a> ByteReadSession<'a> {
         ));
     }
 
-    pub fn consume_cursor(&self, cursor: &ByteCursor) {
+    pub fn consume_cursor(&self, cursor: &ByteReadCursor) {
         self.consume(cursor.read_count());
     }
 }
@@ -72,12 +72,12 @@ impl Drop for ByteReadSession<'_> {
 }
 
 #[derive(Debug, Clone)]
-pub struct ByteCursor<'a> {
+pub struct ByteReadCursor<'a> {
     original: &'a [u8],
     remaining: &'a [u8],
 }
 
-impl<'a> ByteCursor<'a> {
+impl<'a> ByteReadCursor<'a> {
     pub const fn new(buf: &'a [u8]) -> Self {
         Self {
             original: buf,
