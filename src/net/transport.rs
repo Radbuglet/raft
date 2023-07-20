@@ -70,11 +70,13 @@ impl Decoder for MinecraftCodec {
 
     // TODO: Handle legacy framing of packets.
     fn decode(&mut self, stream: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        log::trace!("MinecraftCodec is buffering {} byte(s).", stream.len());
+
         let stream = ByteReadSession::new(stream);
         let cursor = &mut stream.cursor();
 
         if !self.is_compressed {
-            // Decode length, validate it, and ensure we have the capacity to hold it
+            // Decode length, validate it, and ensure we have the capacity to hold it.
             let Some(length) = VarInt::decode(cursor)? else { return Ok(None) };
 
             if length.0 > self.max_recv_len {

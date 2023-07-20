@@ -24,12 +24,42 @@ impl<'a> ByteReadSession<'a> {
         }
     }
 
-    pub fn frozen_bytes(&self) -> Bytes {
-        self.bytes.clone().freeze()
-    }
-
     pub fn freeze_range(&self, subset: &[u8]) -> Bytes {
-        self.frozen_bytes().slice_ref(subset)
+        // Adapted from `Bytes::slice_ref`.
+
+        // Empty slice and empty Bytes may have their pointers reset
+        // so explicitly allow empty slice to be a sub-slice of any slice.
+        if subset.is_empty() {
+            return Bytes::new();
+        }
+
+        let bytes_p = self.bytes.as_ptr() as usize;
+        let bytes_len = self.bytes.len();
+
+        let sub_p = subset.as_ptr() as usize;
+        let sub_len = subset.len();
+
+        assert!(
+            sub_p >= bytes_p,
+            "subset pointer ({:p}) is smaller than self pointer ({:p})",
+            subset.as_ptr(),
+            self.bytes.as_ptr(),
+        );
+        assert!(
+            sub_p + sub_len <= bytes_p + bytes_len,
+            "subset is out of bounds: self = ({:p}, {}), subset = ({:p}, {})",
+            self.bytes.as_ptr(),
+            bytes_len,
+            subset.as_ptr(),
+            sub_len,
+        );
+
+        let sub_offset = sub_p - bytes_p;
+
+        self.bytes
+            .clone()
+            .freeze()
+            .slice(sub_offset..(sub_offset + sub_len))
     }
 
     pub fn bytes(&self) -> &BytesMut {
@@ -119,10 +149,7 @@ impl<'a> ByteReadCursor<'a> {
     }
 
     pub fn read_arr<const N: usize>(&mut self) -> Option<[u8; N]> {
-        let res = self.remaining.try_into().ok()?;
-        self.remaining = &self.remaining[N..];
-
-        Some(res)
+        self.read_slice(N).map(|slice| slice.try_into().unwrap())
     }
 
     pub fn format_location(&self) -> impl fmt::Display {
