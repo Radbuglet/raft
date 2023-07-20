@@ -8,6 +8,15 @@ use crate::util::codec::ByteReadSession;
 
 use super::primitives::{StreamPrimitive, VarInt};
 
+// === Constants === //
+
+/// The hard maximum on the size of either a server-bound or client-bound packet.
+///
+/// This seems to be an additional artificial restriction on packet length.
+///
+/// [See wiki.vg for details.](https://wiki.vg/index.php?title=Protocol&oldid=18305#Packet_format).
+pub const HARD_MAX_PACKET_LEN_INCL: u32 = 2 << 21 - 1;
+
 // === Streams === //
 
 #[derive(Debug)]
@@ -21,7 +30,7 @@ impl RawPeerStream {
             stream: Framed::new(
                 stream,
                 MinecraftCodec {
-                    max_recv_len,
+                    max_recv_len: max_recv_len.min(HARD_MAX_PACKET_LEN_INCL),
                     is_compressed: false,
                 },
             ),
@@ -37,7 +46,7 @@ impl RawPeerStream {
     }
 
     pub fn set_max_recv_len(&mut self, len: u32) {
-        self.stream.codec_mut().max_recv_len = len;
+        self.stream.codec_mut().max_recv_len = len.min(HARD_MAX_PACKET_LEN_INCL);
     }
 }
 
@@ -59,6 +68,7 @@ impl Decoder for MinecraftCodec {
     type Item = RawPacket;
     type Error = anyhow::Error;
 
+    // TODO: Handle legacy framing of packets.
     fn decode(&mut self, stream: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let stream = ByteReadSession::new(stream);
         let cursor = &mut stream.cursor();
@@ -109,7 +119,9 @@ impl Encoder<RawPacket> for MinecraftCodec {
 
             // Determine the overall packet len.
             let packet_len = id_len + packet.body.len();
-            let Ok(packet_len) = u32::try_from(packet_len) else {
+            let Some(packet_len) = u32::try_from(packet_len)
+				.ok().filter(|&v| v <= HARD_MAX_PACKET_LEN_INCL)
+			else {
 				anyhow::bail!("packet is too big (length: {})", packet_len);
 			};
 

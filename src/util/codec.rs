@@ -1,6 +1,8 @@
-use std::cell::Cell;
+use std::{cell::Cell, fmt};
 
 use bytes::{Buf, Bytes, BytesMut};
+
+use super::format::lazy_format;
 
 #[derive(Debug)]
 pub struct ByteReadSession<'a> {
@@ -121,5 +123,10 @@ impl<'a> ByteReadCursor<'a> {
         self.remaining = &self.remaining[N..];
 
         Some(res)
+    }
+
+    pub fn format_location(&self) -> impl fmt::Display {
+        let read_count = self.read_count();
+        lazy_format!("{read_count} byte(s) from the packet frame start")
     }
 }
