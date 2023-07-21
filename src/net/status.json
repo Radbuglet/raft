@@ -1,0 +1,18 @@
+{
+	"version": {
+		"name": "1.20.1",
+		"protocol": 763
+	},
+	"players": {
+		"max": 1000,
+		"online": 2,
+		"sample": []
+	},
+	"description": {
+		"text": "Raft Development Server",
+		"color": "red"
+	},
+	"favicon": "data:image/png;base64,<data>",
+	"enforcesSecureChat": true,
+	"previewsChat": true
+}

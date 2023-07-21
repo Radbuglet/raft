@@ -31,12 +31,12 @@ impl RawPeerStream {
         }
     }
 
-    pub async fn read(&mut self) -> Option<anyhow::Result<FramedPacket>> {
+    pub async fn read(&mut self) -> Option<anyhow::Result<Bytes>> {
         self.stream.next().await
     }
 
-    pub async fn write<B: SizedCodec>(&mut self, packet: FramedPacket<B>) -> anyhow::Result<()> {
-        self.stream.send(packet).await
+    pub async fn write(&mut self, packet: impl UnframedPacket) -> anyhow::Result<()> {
+        self.stream.send(packet.frame()).await
     }
 
     pub fn set_max_recv_len(&mut self, len: u32) {
@@ -44,10 +44,14 @@ impl RawPeerStream {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct FramedPacket<B = Bytes> {
-    pub id: u32,
-    pub body: B,
+// === Packet traits === //
+
+pub trait FramedPacket: SizedCodec {}
+
+pub trait UnframedPacket {
+    type Framed: FramedPacket;
+
+    fn frame(self) -> Self::Framed;
 }
 
 // === Codecs === //
@@ -59,7 +63,7 @@ struct MinecraftCodec {
 }
 
 impl Decoder for MinecraftCodec {
-    type Item = FramedPacket;
+    type Item = Bytes;
     type Error = anyhow::Error;
 
     // TODO: Handle legacy framing of packets.
@@ -82,53 +86,39 @@ impl Decoder for MinecraftCodec {
 
             stream.reserve(length.0 as usize);
 
-            // Decode the packet ID; this may cause us to parse more than the allotted length but we
-            // check for that scenario later so this is fine.
-            let id_pos = cursor.read_count();
-            let Some(id) = VarInt::decode_streaming(cursor)? else { return Ok(None) };
-
             // Decode the body
-            let body_pos = cursor.read_count();
-            let Some(body_len) = length.0.checked_sub((body_pos - id_pos) as u32) else {
-				anyhow::bail!("received packet with a negative body size");
-			};
-            let Some(body) = cursor.read_slice(body_len as usize) else { return Ok(None) };
+            let Some(body) = cursor.read_slice(length.0 as usize) else { return Ok(None) };
 
             // Construct a frame for it
             let body = stream.freeze_range(body);
             stream.consume_cursor(&cursor);
 
-            Ok(Some(FramedPacket { id: id.0, body }))
+            Ok(Some(body))
         } else {
             todo!();
         }
     }
 }
 
-impl<B: SizedCodec> Encoder<FramedPacket<B>> for MinecraftCodec {
+impl<B: FramedPacket> Encoder<B> for MinecraftCodec {
     type Error = anyhow::Error;
 
-    fn encode(
-        &mut self,
-        packet: FramedPacket<B>,
-        dst: &mut bytes::BytesMut,
-    ) -> Result<(), Self::Error> {
+    fn encode(&mut self, packet: B, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
         if !self.is_compressed {
-            // Determine the length of the packet ID.
-            let id_len = VarInt(packet.id).size();
+            let size = packet.size();
 
-            // Determine the overall packet len.
-            let packet_len = id_len + packet.body.size();
-            let Some(packet_len) = u32::try_from(packet_len)
-				.ok().filter(|&v| v <= HARD_MAX_PACKET_LEN_INCL)
-			else {
-				anyhow::bail!("packet is too big (length: {})", packet_len);
-			};
+            // Validate packet size
+            let Some(size) = size
+                .try_into()
+                .ok()
+                .filter(|&v| v < HARD_MAX_PACKET_LEN_INCL)
+            else {
+                anyhow::bail!("Attempted to send packet of size {size}, which is too big!");
+            };
 
-            // Write out the packet.
-            VarInt(packet_len).encode(dst);
-            VarInt(packet.id).encode(dst);
-            packet.body.encode(dst);
+            // Write out packet
+            VarInt(size).encode(dst);
+            packet.encode(dst);
 
             Ok(())
         } else {

@@ -1,6 +1,9 @@
-use super::primitives::{codec_struct, ByteString, Codec, VarInt};
-use super::transport::FramedPacket;
+use super::primitives::{codec_struct, ByteString, Codec, SizedCodec, VarInt};
+use super::transport::{FramedPacket, UnframedPacket};
 
+use crate::util::byte_cursor::{ByteReadCursor, Snip};
+
+use bytes::BufMut;
 use std::any::type_name;
 
 // === Core === //
@@ -34,36 +37,52 @@ macro_rules! derive_protocol {
 				$($packet_name($packet_name),)*
 			}
 
-			#[allow(dead_code)]
-			impl Packet {
-				pub fn decode(packet: &FramedPacket) -> anyhow::Result<Self> {
-					match packet.id {
-						$($id => Ok($packet_name::decode_bytes(&packet.body)?.into()),)*
-						_ => anyhow::bail!(
-							"Unrecognized packet ID ({}) for state {}",
-							packet.id,
-							type_name::<Self>(),
-						),
+			pub use Packet::*;
+
+			impl Codec for Packet {
+				#[allow(unused_variables)]
+				fn decode(src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+					let id = VarInt::decode(src, cursor)?.0;
+
+					match id {
+						$($id => Ok($packet_name::decode(src, cursor)?.into()),)*
+						_ => anyhow::bail!("Unknown packet with ID {id} in state {}", type_name::<Self>()),
 					}
 				}
 
-				pub fn frame(self) -> FramedPacket<Self> {
-					let id = match &self {
-						$(Self::$packet_name(_) => $id,)*
-					};
-
-					FramedPacket { id, body: self }
+				#[allow(unused_variables)]
+			    fn encode(&self, cursor: &mut impl BufMut) {
+					match self {
+						$(Self::$packet_name(packet) => {
+							VarInt($id).encode(cursor);
+							packet.encode(cursor);
+						})*
+					}
 				}
 			}
 
-			pub use Packet::*;
+			impl SizedCodec for Packet {
+				fn size(&self) -> usize {
+					match self {
+						$(Self::$packet_name(packet) => VarInt($id).size() + packet.size(),)*
+					}
+				}
+			}
 
-			// TODO: Implement CodecWrite for Packet.
+			impl FramedPacket for Packet {}
 
 			$(
 				impl From<$packet_name> for Packet {
 					fn from(packet: $packet_name) -> Self {
 						Self::$packet_name(packet)
+					}
+				}
+
+				impl UnframedPacket for $packet_name {
+					type Framed = Packet;
+
+					fn frame(self) -> Self::Framed {
+						self.into()
 					}
 				}
 			)*

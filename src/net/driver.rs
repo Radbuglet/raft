@@ -1,6 +1,9 @@
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::net::protocol::{sb_handshake, sb_status};
+use crate::net::{
+    primitives::{ByteString, Codec},
+    protocol::{cb_status, sb_handshake, sb_status},
+};
 
 use super::{limits::HARD_MAX_PACKET_LEN_INCL, protocol::PeerState, transport::RawPeerStream};
 
@@ -39,7 +42,7 @@ async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
 
         match state {
             PeerState::Handshake => {
-                let packet = sb_handshake::Packet::decode(&packet)?;
+                let packet = sb_handshake::Packet::decode_bytes(&packet)?;
 
                 match packet {
                     sb_handshake::Handshake(packet) => {
@@ -54,16 +57,24 @@ async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
                 }
             }
             PeerState::Status => {
-                let packet = sb_status::Packet::decode(&packet)?;
+                let packet = sb_status::Packet::decode_bytes(&packet)?;
 
                 match packet {
                     sb_status::StatusRequest(packet) => {
                         log::info!("Received status request: {packet:#?}");
-                        return Ok(true);
+                        peer_stream
+                            .write(cb_status::StatusResponse {
+                                json_resp: ByteString::from_static_str(include_str!("status.json")),
+                            })
+                            .await?;
                     }
                     sb_status::PingRequest(packet) => {
                         log::info!("Received ping request: {packet:#?}");
-                        return Ok(true);
+                        peer_stream
+                            .write(cb_status::PingResponse {
+                                payload: packet.payload,
+                            })
+                            .await?;
                     }
                 }
             }
