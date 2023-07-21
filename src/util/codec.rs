@@ -4,8 +4,61 @@ use bytes::{Buf, Bytes, BytesMut};
 
 use super::format::lazy_format;
 
+// === Snip === //
+
+pub trait Snip {
+    fn freeze_range(&self, subset: &[u8]) -> Bytes;
+}
+
+impl Snip for Bytes {
+    fn freeze_range(&self, subset: &[u8]) -> Bytes {
+        self.slice_ref(subset)
+    }
+}
+
+impl Snip for BytesMut {
+    fn freeze_range(&self, subset: &[u8]) -> Bytes {
+        // Adapted from `Bytes::slice_ref`.
+
+        // Empty slice and empty Bytes may have their pointers reset
+        // so explicitly allow empty slice to be a sub-slice of any slice.
+        if subset.is_empty() {
+            return Bytes::new();
+        }
+
+        let bytes_p = self.as_ptr() as usize;
+        let bytes_len = self.len();
+
+        let sub_p = subset.as_ptr() as usize;
+        let sub_len = subset.len();
+
+        assert!(
+            sub_p >= bytes_p,
+            "subset pointer ({:p}) is smaller than self pointer ({:p})",
+            subset.as_ptr(),
+            self.as_ptr(),
+        );
+        assert!(
+            sub_p + sub_len <= bytes_p + bytes_len,
+            "subset is out of bounds: self = ({:p}, {}), subset = ({:p}, {})",
+            self.as_ptr(),
+            bytes_len,
+            subset.as_ptr(),
+            sub_len,
+        );
+
+        let sub_offset = sub_p - bytes_p;
+
+        self.clone()
+            .freeze()
+            .slice(sub_offset..(sub_offset + sub_len))
+    }
+}
+
+// === ByteMutReadSession === //
+
 #[derive(Debug)]
-pub struct ByteReadSession<'a> {
+pub struct ByteMutReadSession<'a> {
     bytes: &'a mut BytesMut,
     post_op: Cell<PostOp>,
 }
@@ -16,50 +69,12 @@ enum PostOp {
     Consume(usize),
 }
 
-impl<'a> ByteReadSession<'a> {
+impl<'a> ByteMutReadSession<'a> {
     pub fn new(bytes: &'a mut BytesMut) -> Self {
         Self {
             bytes,
             post_op: Cell::new(PostOp::Reserve(0)),
         }
-    }
-
-    pub fn freeze_range(&self, subset: &[u8]) -> Bytes {
-        // Adapted from `Bytes::slice_ref`.
-
-        // Empty slice and empty Bytes may have their pointers reset
-        // so explicitly allow empty slice to be a sub-slice of any slice.
-        if subset.is_empty() {
-            return Bytes::new();
-        }
-
-        let bytes_p = self.bytes.as_ptr() as usize;
-        let bytes_len = self.bytes.len();
-
-        let sub_p = subset.as_ptr() as usize;
-        let sub_len = subset.len();
-
-        assert!(
-            sub_p >= bytes_p,
-            "subset pointer ({:p}) is smaller than self pointer ({:p})",
-            subset.as_ptr(),
-            self.bytes.as_ptr(),
-        );
-        assert!(
-            sub_p + sub_len <= bytes_p + bytes_len,
-            "subset is out of bounds: self = ({:p}, {}), subset = ({:p}, {})",
-            self.bytes.as_ptr(),
-            bytes_len,
-            subset.as_ptr(),
-            sub_len,
-        );
-
-        let sub_offset = sub_p - bytes_p;
-
-        self.bytes
-            .clone()
-            .freeze()
-            .slice(sub_offset..(sub_offset + sub_len))
     }
 
     pub fn bytes(&self) -> &BytesMut {
@@ -94,7 +109,13 @@ impl<'a> ByteReadSession<'a> {
     }
 }
 
-impl Drop for ByteReadSession<'_> {
+impl Snip for ByteMutReadSession<'_> {
+    fn freeze_range(&self, subset: &[u8]) -> Bytes {
+        self.bytes.freeze_range(subset)
+    }
+}
+
+impl Drop for ByteMutReadSession<'_> {
     fn drop(&mut self) {
         match self.post_op.get() {
             PostOp::Reserve(count) => self.bytes.reserve(count),
@@ -102,6 +123,8 @@ impl Drop for ByteReadSession<'_> {
         }
     }
 }
+
+// === ByteReadCursor === //
 
 #[derive(Debug, Clone)]
 pub struct ByteReadCursor<'a> {
@@ -137,13 +160,17 @@ impl<'a> ByteReadCursor<'a> {
         self.remaining.is_empty()
     }
 
+    pub fn advance(&mut self, count: usize) {
+        self.remaining = &self.remaining[count..];
+    }
+
     pub fn read(&mut self) -> Option<u8> {
         self.read_arr::<1>().map(|[v]| v)
     }
 
     pub fn read_slice(&mut self, count: usize) -> Option<&'a [u8]> {
         let res = self.remaining.get(0..count)?;
-        self.remaining = &self.remaining[count..];
+        self.advance(count);
 
         Some(res)
     }

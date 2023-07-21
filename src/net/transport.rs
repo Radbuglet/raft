@@ -4,18 +4,12 @@ use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
-use crate::util::codec::ByteReadSession;
+use crate::util::codec::{ByteMutReadSession, Snip};
 
-use super::primitives::{StreamPrimitive, VarInt};
-
-// === Constants === //
-
-/// The hard maximum on the size of either a server-bound or client-bound packet.
-///
-/// This seems to be an additional artificial restriction on packet length.
-///
-/// [See wiki.vg for details.](https://wiki.vg/index.php?title=Protocol&oldid=18305#Packet_format).
-pub const HARD_MAX_PACKET_LEN_INCL: u32 = 2 << 21 - 1;
+use super::{
+    limits::HARD_MAX_PACKET_LEN_INCL,
+    primitives::{TinyCodec, VarInt},
+};
 
 // === Streams === //
 
@@ -72,12 +66,12 @@ impl Decoder for MinecraftCodec {
     fn decode(&mut self, stream: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         log::trace!("MinecraftCodec is buffering {} byte(s).", stream.len());
 
-        let stream = ByteReadSession::new(stream);
+        let stream = ByteMutReadSession::new(stream);
         let cursor = &mut stream.cursor();
 
         if !self.is_compressed {
             // Decode length, validate it, and ensure we have the capacity to hold it.
-            let Some(length) = VarInt::decode(cursor)? else { return Ok(None) };
+            let Some(length) = VarInt::decode_tiny(cursor)? else { return Ok(None) };
 
             if length.0 > self.max_recv_len {
                 anyhow::bail!(
@@ -91,7 +85,7 @@ impl Decoder for MinecraftCodec {
             // Decode the packet ID; this may cause us to parse more than the allotted length but we
             // check for that scenario later so this is fine.
             let id_pos = cursor.read_count();
-            let Some(id) = VarInt::decode(cursor)? else { return Ok(None) };
+            let Some(id) = VarInt::decode_tiny(cursor)? else { return Ok(None) };
 
             // Decode the body
             let body_pos = cursor.read_count();
@@ -128,8 +122,8 @@ impl Encoder<RawPacket> for MinecraftCodec {
 			};
 
             // Write out the packet.
-            VarInt(packet_len).encode(dst);
-            VarInt(packet.id).encode(dst);
+            VarInt(packet_len).encode_tiny(dst);
+            VarInt(packet.id).encode_tiny(dst);
             dst.put(packet.body);
 
             Ok(())
