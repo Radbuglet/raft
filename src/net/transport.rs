@@ -1,14 +1,14 @@
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use futures::SinkExt;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
-use crate::util::codec::{ByteMutReadSession, Snip};
+use crate::util::byte_cursor::{ByteMutReadSession, Snip};
 
 use super::{
     limits::HARD_MAX_PACKET_LEN_INCL,
-    primitives::{TinyCodec, VarInt},
+    primitives::{Codec, SizedCodec, StreamingCodec, VarInt},
 };
 
 // === Streams === //
@@ -31,11 +31,11 @@ impl RawPeerStream {
         }
     }
 
-    pub async fn read(&mut self) -> Option<anyhow::Result<RawPacket>> {
+    pub async fn read(&mut self) -> Option<anyhow::Result<FramedPacket>> {
         self.stream.next().await
     }
 
-    pub async fn write(&mut self, packet: RawPacket) -> anyhow::Result<()> {
+    pub async fn write<B: SizedCodec>(&mut self, packet: FramedPacket<B>) -> anyhow::Result<()> {
         self.stream.send(packet).await
     }
 
@@ -45,9 +45,9 @@ impl RawPeerStream {
 }
 
 #[derive(Debug, Clone)]
-pub struct RawPacket {
+pub struct FramedPacket<B = Bytes> {
     pub id: u32,
-    pub body: Bytes,
+    pub body: B,
 }
 
 // === Codecs === //
@@ -59,7 +59,7 @@ struct MinecraftCodec {
 }
 
 impl Decoder for MinecraftCodec {
-    type Item = RawPacket;
+    type Item = FramedPacket;
     type Error = anyhow::Error;
 
     // TODO: Handle legacy framing of packets.
@@ -71,7 +71,7 @@ impl Decoder for MinecraftCodec {
 
         if !self.is_compressed {
             // Decode length, validate it, and ensure we have the capacity to hold it.
-            let Some(length) = VarInt::decode_tiny(cursor)? else { return Ok(None) };
+            let Some(length) = VarInt::decode_streaming(cursor)? else { return Ok(None) };
 
             if length.0 > self.max_recv_len {
                 anyhow::bail!(
@@ -85,7 +85,7 @@ impl Decoder for MinecraftCodec {
             // Decode the packet ID; this may cause us to parse more than the allotted length but we
             // check for that scenario later so this is fine.
             let id_pos = cursor.read_count();
-            let Some(id) = VarInt::decode_tiny(cursor)? else { return Ok(None) };
+            let Some(id) = VarInt::decode_streaming(cursor)? else { return Ok(None) };
 
             // Decode the body
             let body_pos = cursor.read_count();
@@ -98,23 +98,27 @@ impl Decoder for MinecraftCodec {
             let body = stream.freeze_range(body);
             stream.consume_cursor(&cursor);
 
-            Ok(Some(RawPacket { id: id.0, body }))
+            Ok(Some(FramedPacket { id: id.0, body }))
         } else {
             todo!();
         }
     }
 }
 
-impl Encoder<RawPacket> for MinecraftCodec {
+impl<B: SizedCodec> Encoder<FramedPacket<B>> for MinecraftCodec {
     type Error = anyhow::Error;
 
-    fn encode(&mut self, packet: RawPacket, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+    fn encode(
+        &mut self,
+        packet: FramedPacket<B>,
+        dst: &mut bytes::BytesMut,
+    ) -> Result<(), Self::Error> {
         if !self.is_compressed {
             // Determine the length of the packet ID.
-            let id_len = VarInt(packet.id).length::<{ VarInt::MAX_SIZE }>();
+            let id_len = VarInt(packet.id).size();
 
             // Determine the overall packet len.
-            let packet_len = id_len + packet.body.len();
+            let packet_len = id_len + packet.body.size();
             let Some(packet_len) = u32::try_from(packet_len)
 				.ok().filter(|&v| v <= HARD_MAX_PACKET_LEN_INCL)
 			else {
@@ -122,9 +126,9 @@ impl Encoder<RawPacket> for MinecraftCodec {
 			};
 
             // Write out the packet.
-            VarInt(packet_len).encode_tiny(dst);
-            VarInt(packet.id).encode_tiny(dst);
-            dst.put(packet.body);
+            VarInt(packet_len).encode(dst);
+            VarInt(packet.id).encode(dst);
+            packet.body.encode(dst);
 
             Ok(())
         } else {

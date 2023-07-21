@@ -164,6 +164,10 @@ impl<'a> ByteReadCursor<'a> {
         self.remaining = &self.remaining[count..];
     }
 
+    pub fn advance_remaining(&mut self) {
+        self.remaining = &[];
+    }
+
     pub fn read(&mut self) -> Option<u8> {
         self.read_arr::<1>().map(|[v]| v)
     }
