@@ -1,3 +1,5 @@
+#![allow(dead_code)] // TODO: Remove
+
 mod driver;
 mod net;
 mod util;

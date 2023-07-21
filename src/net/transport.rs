@@ -46,7 +46,7 @@ impl RawPeerStream {
 
 // === Packet traits === //
 
-pub trait FramedPacket: SizedCodec {}
+pub trait FramedPacket: SizedCodec<()> {}
 
 pub trait UnframedPacket {
     type Framed: FramedPacket;
@@ -105,7 +105,7 @@ impl<B: FramedPacket> Encoder<B> for MinecraftCodec {
 
     fn encode(&mut self, packet: B, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
         if !self.is_compressed {
-            let size = packet.size();
+            let size = packet.size(());
 
             // Validate packet size
             let Some(size) = size
@@ -117,8 +117,8 @@ impl<B: FramedPacket> Encoder<B> for MinecraftCodec {
             };
 
             // Write out packet
-            VarInt(size).encode(dst);
-            packet.encode(dst);
+            VarInt(size).encode((), dst);
+            packet.encode((), dst);
 
             Ok(())
         } else {

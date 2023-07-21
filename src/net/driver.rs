@@ -1,8 +1,8 @@
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::net::{
-    primitives::{ByteString, Codec},
-    protocol::{cb_status, sb_handshake, sb_status},
+    primitives::{Codec, NetString},
+    protocol::{cb_login, cb_status, sb_handshake, sb_login, sb_status},
 };
 
 use super::{limits::HARD_MAX_PACKET_LEN_INCL, protocol::PeerState, transport::RawPeerStream};
@@ -42,7 +42,7 @@ async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
 
         match state {
             PeerState::Handshake => {
-                let packet = sb_handshake::Packet::decode_bytes(&packet)?;
+                let packet = sb_handshake::Packet::decode_bytes((), &packet)?;
 
                 match packet {
                     sb_handshake::Handshake(packet) => {
@@ -57,14 +57,16 @@ async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
                 }
             }
             PeerState::Status => {
-                let packet = sb_status::Packet::decode_bytes(&packet)?;
+                let packet = sb_status::Packet::decode_bytes((), &packet)?;
 
                 match packet {
                     sb_status::StatusRequest(packet) => {
                         log::info!("Received status request: {packet:#?}");
                         peer_stream
                             .write(cb_status::StatusResponse {
-                                json_resp: ByteString::from_static_str(include_str!("status.json")),
+                                json_resp: NetString::from_static_str(include_str!(
+                                    "tmp/status.json"
+                                )),
                             })
                             .await?;
                     }
@@ -78,7 +80,23 @@ async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
                     }
                 }
             }
-            PeerState::Login => todo!(),
+            PeerState::Login => {
+                let packet = sb_login::Packet::decode_bytes((), &packet)?;
+
+                match packet {
+                    sb_login::LoginStart(packet) => {
+                        log::info!("Received login start request: {packet:?}");
+
+                        peer_stream
+                            .write(cb_login::Disconnect {
+                                reason: NetString::from_static_str(include_str!("tmp/kick.json")),
+                            })
+                            .await?;
+                    }
+                    sb_login::EncryptionResponse(packet) => todo!(),
+                    sb_login::LoginPluginResponse(packet) => todo!(),
+                }
+            }
             PeerState::Play => todo!(),
         }
     }
