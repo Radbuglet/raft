@@ -1,4 +1,6 @@
-use super::primitives::{codec_struct, ByteArray, Codec, NetString, SizedCodec, Uuid, VarInt};
+use super::primitives::{
+    codec_struct, ByteArray, Chat, Codec, Identifier, NetString, SizedCodec, Uuid, VarInt,
+};
 use super::transport::{FramedPacket, UnframedPacket};
 
 use crate::util::byte_cursor::{ByteReadCursor, Snip};
@@ -7,14 +9,6 @@ use bytes::{BufMut, Bytes};
 use std::any::type_name;
 
 // === Core === //
-
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub enum PeerState {
-    Handshake,
-    Status,
-    Login,
-    Play,
-}
 
 macro_rules! derive_protocol {
     ($(
@@ -93,6 +87,7 @@ macro_rules! derive_protocol {
 
 			codec_struct! {$(
 				$(#[$packet_attr])*
+				#[derive(Debug, Clone)]
 				pub struct $packet_name {
 					$(pub $field_name: $field_ty $(=> $field_config)?,)*
 				}
@@ -107,7 +102,6 @@ derive_protocol! {
     // === Handshake === //
 
     pub mod sb_handshake {
-        #[derive(Debug, Clone)]
         struct Handshake(0) {
             version: VarInt,
             server_addr: NetString => 255,
@@ -119,22 +113,18 @@ derive_protocol! {
     // === Status === //
 
     pub mod cb_status {
-        #[derive(Debug, Clone)]
         struct StatusResponse(0) {
             json_resp: NetString,
         }
 
-        #[derive(Debug, Clone)]
         struct PingResponse(1) {
             payload: i64,
         }
     }
 
     pub mod sb_status {
-        #[derive(Debug, Clone)]
         struct StatusRequest(0) {}
 
-        #[derive(Debug, Clone)]
         struct PingRequest(1) {
             payload: i64,
         }
@@ -143,38 +133,62 @@ derive_protocol! {
     // === Login === //
 
     pub mod cb_login {
-        #[derive(Debug, Clone)]
         struct Disconnect(0) {
-            reason: NetString,
+            reason: Chat,
         }
 
-        #[derive(Debug, Clone)]
         struct EncryptionRequest(1) {
             server_id: NetString => 20,
             public_key: ByteArray,
             verify_token: ByteArray,
         }
 
-        // TODO
+        struct LoginSuccess(2) {
+            uuid: Uuid,
+            username: NetString => 16,
+            properties: Vec<structs::Property> => || {},
+        }
+
+        struct SetCompression(3) {
+            threshold: VarInt,
+        }
+
+        struct LoadPluginRequest(4) {
+            message_id: VarInt,
+            channel: Identifier,
+            data: Bytes,
+        }
     }
 
     pub mod sb_login {
-        #[derive(Debug, Clone)]
         struct LoginStart(0) {
             name: NetString => 16,
             player_uuid: Option<Uuid>,
         }
 
-        #[derive(Debug, Clone)]
         struct EncryptionResponse(1) {
             shared_secret: ByteArray,
             verify_token: ByteArray,
         }
 
-        #[derive(Debug, Clone)]
         struct LoginPluginResponse(2) {
             message_id: VarInt,
             data: Option<Bytes>,
+        }
+    }
+}
+
+// === Reusable Structures === //
+
+pub mod structs {
+    use super::*;
+
+    codec_struct! {
+        #[derive(Debug, Clone)]
+        pub struct Property {
+            name: NetString => 32767,
+            value: NetString => 32767,
+            signature: Option<NetString> => 32767,
         }
     }
 }

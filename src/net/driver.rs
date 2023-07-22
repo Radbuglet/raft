@@ -1,14 +1,12 @@
+use smallvec::SmallVec;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::net::{
-    primitives::{Codec, NetString},
+    primitives::{ChatComponent, Codec, JsonValue, NetString, RootChatComponent},
     protocol::{cb_login, cb_status, sb_handshake, sb_login, sb_status},
 };
 
-use super::{
-    protocol::PeerState,
-    transport::{RawPeerStream, HARD_MAX_PACKET_LEN_INCL},
-};
+use super::transport::{RawPeerStream, HARD_MAX_PACKET_LEN_INCL};
 
 pub async fn run_server() -> anyhow::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
@@ -35,7 +33,16 @@ pub async fn run_server() -> anyhow::Result<()> {
     }
 }
 
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+enum PeerState {
+    Handshake,
+    Status,
+    Login,
+    Play,
+}
+
 async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
+    let peer_addr = peer_stream.peer_addr()?;
     let mut peer_stream = RawPeerStream::new(peer_stream, HARD_MAX_PACKET_LEN_INCL);
     let mut state = PeerState::Handshake;
 
@@ -92,7 +99,30 @@ async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
 
                         peer_stream
                             .write(cb_login::Disconnect {
-                                reason: NetString::from_static_str(include_str!("tmp/kick.json")),
+                                reason: JsonValue(RootChatComponent(SmallVec::from_iter([
+                                    ChatComponent {
+                                        text: Some(format!("Your IP is ",)),
+                                        color: Some("red".to_string()),
+                                        ..Default::default()
+                                    },
+                                    ChatComponent {
+                                        text: Some(peer_addr.to_string()),
+                                        color: Some("white".to_string()),
+                                        bold: Some(true),
+                                        ..Default::default()
+                                    },
+                                    ChatComponent {
+                                        text: Some(format!(".",)),
+                                        color: Some("red".to_string()),
+                                        ..Default::default()
+                                    },
+                                    ChatComponent {
+                                        text: Some(format!("\n\nRun.",)),
+                                        color: Some("dark_red".to_string()),
+                                        italic: Some(true),
+                                        ..Default::default()
+                                    },
+                                ]))),
                             })
                             .await?;
                     }

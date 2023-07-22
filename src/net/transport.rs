@@ -32,7 +32,7 @@ impl RawPeerStream {
                 stream,
                 MinecraftCodec {
                     max_recv_len: max_recv_len.min(HARD_MAX_PACKET_LEN_INCL),
-                    is_compressed: false,
+                    compression_threshold: None,
                 },
             ),
         }
@@ -66,7 +66,7 @@ pub trait UnframedPacket {
 #[derive(Debug, Copy, Clone, Default)]
 struct MinecraftCodec {
     pub max_recv_len: u32,
-    pub is_compressed: bool,
+    pub compression_threshold: Option<u32>,
 }
 
 impl Decoder for MinecraftCodec {
@@ -80,7 +80,9 @@ impl Decoder for MinecraftCodec {
         let stream = ByteMutReadSession::new(stream);
         let cursor = &mut stream.cursor();
 
-        if !self.is_compressed {
+        if let Some(_compression_threshold) = self.compression_threshold {
+            todo!();
+        } else {
             // Decode length, validate it, and ensure we have the capacity to hold it.
             let Some(length) = VarUint::decode_streaming(cursor)? else { return Ok(None) };
 
@@ -101,8 +103,6 @@ impl Decoder for MinecraftCodec {
             stream.consume_cursor(&cursor);
 
             Ok(Some(body))
-        } else {
-            todo!();
         }
     }
 }
@@ -111,7 +111,9 @@ impl<B: FramedPacket> Encoder<B> for MinecraftCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, packet: B, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        if !self.is_compressed {
+        if let Some(_compression_threshold) = self.compression_threshold {
+            todo!();
+        } else {
             let size = packet.size(());
 
             // Validate packet size
@@ -128,8 +130,6 @@ impl<B: FramedPacket> Encoder<B> for MinecraftCodec {
             packet.encode((), dst);
 
             Ok(())
-        } else {
-            todo!();
         }
     }
 }

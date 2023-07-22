@@ -1,9 +1,13 @@
 use bytes::{BufMut, Bytes};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{any::type_name, mem, ops::Deref};
+
+use smallvec::SmallVec;
 
 use crate::util::{
     bits::{i32_from_u32_2c, i32_to_u32_2c, StaticBitSet},
     byte_cursor::{ByteReadCursor, Snip},
+    write::WriteByteCounter,
 };
 
 const TOO_BIG_ERR: &str = "byte array is too big to send over the network";
@@ -128,7 +132,7 @@ macro_rules! codec_struct {
 
 		impl $crate::net::primitives::codec_struct_internals::SizedCodec<()> for $struct_name {
             fn size(&self, _args: ()) -> usize {
-				$($crate::net::primitives::codec_struct_internals::SizedCodec::size(&self.$field_name, ()) + )* 0
+				$($crate::net::primitives::codec_struct_internals::SizedCodec::size(&self.$field_name, { $($config)? }) + )* 0
 			}
         }
     )*};
@@ -458,6 +462,193 @@ impl SizedCodec<()> for NetString {
     }
 }
 
+// Identifier
+#[derive(Debug, Clone)]
+pub struct Identifier(pub NetString);
+
+impl Codec<()> for Identifier {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+        Ok(Self(NetString::decode(32767, src, cursor)?))
+    }
+
+    fn encode(&self, _args: (), cursor: &mut impl BufMut) {
+        self.0.encode((), cursor);
+    }
+}
+
+impl SizedCodec<()> for Identifier {
+    fn size(&self, _args: ()) -> usize {
+        self.0.size(())
+    }
+}
+
+// JSON
+#[derive(Debug, Clone)]
+pub struct JsonValue<E>(pub E);
+
+pub trait SerializableJsonValue: serde::de::DeserializeOwned + serde::Serialize {
+    const MAX_STR_LEN: u32;
+}
+
+impl<E: SerializableJsonValue> Codec<()> for JsonValue<E> {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+        let input = NetString::decode(E::MAX_STR_LEN, src, cursor)?;
+        let parsed = serde_json::from_str(&input)?;
+
+        Ok(Self(parsed))
+    }
+
+    fn encode(&self, _args: (), cursor: &mut impl BufMut) {
+        let encoded = serde_json::to_string(&self.0).unwrap();
+        NetString::from_string(encoded).encode(E::MAX_STR_LEN, cursor);
+    }
+}
+
+impl<E: SerializableJsonValue> SizedCodec<()> for JsonValue<E> {
+    fn size(&self, _args: ()) -> usize {
+        let mut counter = WriteByteCounter::default();
+        serde_json::to_writer(&mut counter, &self.0).unwrap();
+
+        VarUint(u32::try_from(counter.0).expect(TOO_BIG_ERR)).size(()) + counter.0
+    }
+}
+
+// Chat
+pub type Chat = JsonValue<RootChatComponent>;
+
+#[derive(Debug, Clone)]
+pub struct RootChatComponent(pub SmallVec<[ChatComponent; 1]>);
+
+impl Serialize for RootChatComponent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.0.len() == 1 {
+            self.0[0].serialize(serializer)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RootChatComponent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'a> serde::de::Visitor<'a> for Visitor {
+            type Value = RootChatComponent;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("root chat component")
+            }
+
+            fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'a>,
+            {
+                Ok(RootChatComponent(SmallVec::from([
+                    ChatComponent::deserialize(deserializer)?,
+                ])))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'a>,
+            {
+                let mut buffer = SmallVec::new();
+                while let Some(elem) = seq.next_element::<ChatComponent>()? {
+                    buffer.push(elem);
+                }
+                Ok(RootChatComponent(buffer))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+impl SerializableJsonValue for RootChatComponent {
+    const MAX_STR_LEN: u32 = 262144;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatComponent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translate: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keybind: Option<String>,
+
+    // TODO: Include score attributes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlined: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obfuscated: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insertion: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "clickEvent")]
+    pub click_event: Option<ChatClickEvent>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "hoverEvent")]
+    pub hover_event: Option<ChatHoverEvent>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<ChatComponent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatClickEvent {
+    pub action: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatHoverEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_text: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_item: Option<ChatShownItem>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_entity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatShownItem {
+    pub id: String,
+    pub count: i32,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
 // Option
 impl<A, T: Codec<A>> Codec<A> for Option<T> {
     fn decode(args: A, src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
@@ -536,5 +727,51 @@ impl Codec<()> for ByteArray {
 impl SizedCodec<()> for ByteArray {
     fn size(&self, _args: ()) -> usize {
         VarUint(u32::try_from(self.0.len()).expect(TOO_BIG_ERR)).size(()) + self.0.len()
+    }
+}
+
+// Vec
+impl<A, F, T> Codec<F> for Vec<T>
+where
+    T: Codec<A>,
+    F: FnMut() -> A,
+{
+    fn decode(mut args: F, src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+        let len = VarUint::decode((), src, cursor)?.0;
+        let mut builder = Vec::with_capacity(len as usize);
+
+        for _ in 0..len {
+            builder.push(T::decode(args(), src, cursor)?);
+        }
+
+        Ok(builder)
+    }
+
+    fn encode(&self, mut args: F, cursor: &mut impl BufMut) {
+        VarUint(u32::try_from(self.len()).expect("vector is too large to send over the network"))
+            .encode((), cursor);
+
+        for elem in self {
+            elem.encode(args(), cursor);
+        }
+    }
+}
+
+impl<A, F, T> SizedCodec<F> for Vec<T>
+where
+    T: SizedCodec<A>,
+    F: FnMut() -> A,
+{
+    fn size(&self, mut args: F) -> usize {
+        let mut accum = VarUint(
+            u32::try_from(self.len()).expect("vector is too large to send over the network"),
+        )
+        .size(());
+
+        for elem in self {
+            accum += elem.size(args());
+        }
+
+        accum
     }
 }
