@@ -5,7 +5,10 @@ use crate::net::{
     protocol::{cb_login, cb_status, sb_handshake, sb_login, sb_status},
 };
 
-use super::{limits::HARD_MAX_PACKET_LEN_INCL, protocol::PeerState, transport::RawPeerStream};
+use super::{
+    protocol::PeerState,
+    transport::{RawPeerStream, HARD_MAX_PACKET_LEN_INCL},
+};
 
 pub async fn run_server() -> anyhow::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
@@ -93,8 +96,8 @@ async fn run_peer_listener(peer_stream: TcpStream) -> anyhow::Result<bool> {
                             })
                             .await?;
                     }
-                    sb_login::EncryptionResponse(packet) => todo!(),
-                    sb_login::LoginPluginResponse(packet) => todo!(),
+                    sb_login::EncryptionResponse(_packet) => todo!(),
+                    sb_login::LoginPluginResponse(_packet) => todo!(),
                 }
             }
             PeerState::Play => todo!(),

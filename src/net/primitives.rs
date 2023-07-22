@@ -2,7 +2,7 @@ use bytes::{BufMut, Bytes};
 use std::{any::type_name, mem, ops::Deref};
 
 use crate::util::{
-    bits::StaticBitSet,
+    bits::{i32_from_u32_2c, i32_to_u32_2c, StaticBitSet},
     byte_cursor::{ByteReadCursor, Snip},
 };
 
@@ -194,45 +194,38 @@ macro_rules! impl_prim {
 impl_prim!(i8, u8, i16, u16, i32, u32, i64, f32, f64, u128);
 
 #[derive(Debug, Copy, Clone)]
-pub struct VarInt(pub u32);
+pub struct VarInt(pub i32);
 
+// Adapted from: https://wiki.vg/index.php?title=Protocol&oldid=18305#VarInt_and_VarLong
 impl StreamingCodec for VarInt {
     fn decode_streaming(cursor: &mut ByteReadCursor) -> StreamingDecodeResult<Self> {
         let mut accum = 0u32;
         let mut shift = 0;
 
-        for i in 1..=5 {
+        loop {
             let Some(byte) = cursor.read() else { return Ok(None) };
+            accum |= ((byte & !u8::MSB) as u32) << shift;
 
-            // Push the byte's 7 first bits into the number. Since this number is little-endian, this
-            // means that we're reading from least significant bits to most significant bits.
-            let Some(new_accum) = accum.checked_add(((byte & !u8::MSB) as u32) << shift) else {
-				anyhow::bail!(
-					"VarInt was malformed and overflew the accumulator (location: {}).",
-					cursor.format_location(),
-				);
-			};
-            accum = new_accum;
-            shift += 7;
-
-            // If the byte's most-significant bit is unset, we know we're done.
             if byte & u8::MSB == 0 {
                 break;
-            } else if i == 5 {
-                // We've reached the end of our VarInt and yet, it claims that it has one more byte.
+            }
+
+            shift += 7;
+
+            if shift >= 32 {
                 anyhow::bail!(
-                    "VarInt was malformed as it claims to have one more byte in an already max-sized \
-					 byte sequence (location: {}).",
-					cursor.format_location(),
+                    "VarInt is too long to fit an i32 (location: {}).",
+                    cursor.format_location(),
                 );
             }
         }
 
+        let accum = i32_from_u32_2c(accum);
         Ok(Some(Self(accum)))
     }
 
     fn encode_streaming(&self, cursor: &mut impl BufMut) {
-        let mut accum = self.0;
+        let mut accum = i32_to_u32_2c(self.0);
 
         loop {
             let byte = accum & !u8::MSB as u32;
@@ -251,6 +244,36 @@ impl StreamingCodec for VarInt {
 impl SizedCodec<()> for VarInt {
     fn size(&self, _args: ()) -> usize {
         size_of_tiny::<5>(self)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct VarUint(pub u32);
+
+impl StreamingCodec for VarUint {
+    fn decode_streaming(cursor: &mut ByteReadCursor) -> StreamingDecodeResult<Self> {
+        let Some(value) = VarInt::decode_streaming(cursor)? else { return Ok(None) };
+        let Ok(value) = u32::try_from(value.0) else {
+			anyhow::bail!(
+				"Encountered a negative value of {} for what should have been a positive VarInt (location: {}).",
+				value.0,
+				cursor.format_location(),
+			);
+		};
+
+        Ok(Some(Self(value)))
+    }
+
+    fn encode_streaming(&self, cursor: &mut impl BufMut) {
+        VarInt(i32::try_from(self.0).expect("Attempted to encode a VarUint which was too big!"))
+            .encode_streaming(cursor)
+    }
+}
+
+impl SizedCodec<()> for VarUint {
+    fn size(&self, _args: ()) -> usize {
+        VarInt(i32::try_from(self.0).expect("Attempted to encode a VarUint which was too big!"))
+            .size(())
     }
 }
 
@@ -324,12 +347,30 @@ impl Codec<Option<u32>> for NetString {
         snip: &impl Snip,
         cursor: &mut ByteReadCursor,
     ) -> anyhow::Result<Self> {
-        let size = VarInt::decode((), snip, cursor)?.0;
+        let size = VarUint::decode((), snip, cursor)?.0;
+
+        if let Some(max_len) = max_len {
+            let max_bytes = max_len.checked_mul(4).unwrap_or_else(|| {
+                panic!(
+                    "NetStrings with a maximum codepoint length of {max_len} are untenable due to \
+					 encoding constraints."
+                )
+            });
+
+            if size > max_bytes {
+                anyhow::bail!(
+					"String byte stream is too long. The string is limited to {max_len} codepoint(s), \
+					 which can be encoded in up to {max_bytes} bytes, but the size of the string in \
+					 bytes is specified as {size} (location: {}).",
+					cursor.format_location(),
+				);
+            }
+        }
 
         let Some(data) = cursor.read_slice(size as usize) else {
 			anyhow::bail!(
-				"Packet did not contain the necessary bytes to form the string: remaining: {}, \
-				 expected: {} (location: {}).",
+				"Packet did not contain the necessary bytes to form the string. Available: {}, \
+				 Expected: {} (location: {}).",
 				 cursor.remaining().len(),
 				 size,
 				 cursor.format_location(),
@@ -381,7 +422,7 @@ impl Codec<Option<u32>> for NetString {
 
 impl SizedCodec<Option<u32>> for NetString {
     fn size(&self, _max_len: Option<u32>) -> usize {
-        VarInt(self.0.len() as u32).size(()) + self.bytes().size(())
+        VarUint(self.0.len() as u32).size(()) + self.bytes().size(())
     }
 }
 
@@ -487,13 +528,13 @@ impl Codec<()> for ByteArray {
     }
 
     fn encode(&self, _args: (), cursor: &mut impl BufMut) {
-        VarInt(u32::try_from(self.0.len()).expect(TOO_BIG_ERR)).encode((), cursor);
+        VarUint(u32::try_from(self.0.len()).expect(TOO_BIG_ERR)).encode((), cursor);
         self.0.encode((), cursor);
     }
 }
 
 impl SizedCodec<()> for ByteArray {
     fn size(&self, _args: ()) -> usize {
-        VarInt(u32::try_from(self.0.len()).expect(TOO_BIG_ERR)).size(()) + self.0.len()
+        VarUint(u32::try_from(self.0.len()).expect(TOO_BIG_ERR)).size(()) + self.0.len()
     }
 }

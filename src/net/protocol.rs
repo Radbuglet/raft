@@ -101,7 +101,7 @@ macro_rules! derive_protocol {
 	)*};
 }
 
-// === Protocol === //
+// === Packet Protocol === //
 
 derive_protocol! {
     // === Handshake === //

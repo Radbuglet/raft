@@ -4,14 +4,21 @@ use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
-use crate::util::byte_cursor::{ByteMutReadSession, Snip};
-
-use super::{
-    limits::HARD_MAX_PACKET_LEN_INCL,
-    primitives::{Codec, SizedCodec, StreamingCodec, VarInt},
+use crate::{
+    net::primitives::VarUint,
+    util::byte_cursor::{ByteMutReadSession, Snip},
 };
 
+use super::primitives::{Codec, SizedCodec, StreamingCodec};
+
 // === Streams === //
+
+/// The hard maximum on the size of either a server-bound or client-bound packet.
+///
+/// This seems to be an additional artificial restriction on packet length.
+///
+/// [See wiki.vg for details.](https://wiki.vg/index.php?title=Protocol&oldid=18305#Packet_format).
+pub const HARD_MAX_PACKET_LEN_INCL: u32 = 2 << 21 - 1;
 
 #[derive(Debug)]
 pub struct RawPeerStream {
@@ -75,7 +82,7 @@ impl Decoder for MinecraftCodec {
 
         if !self.is_compressed {
             // Decode length, validate it, and ensure we have the capacity to hold it.
-            let Some(length) = VarInt::decode_streaming(cursor)? else { return Ok(None) };
+            let Some(length) = VarUint::decode_streaming(cursor)? else { return Ok(None) };
 
             if length.0 > self.max_recv_len {
                 anyhow::bail!(
@@ -117,7 +124,7 @@ impl<B: FramedPacket> Encoder<B> for MinecraftCodec {
             };
 
             // Write out packet
-            VarInt(size).encode((), dst);
+            VarUint(size).encode((), dst);
             packet.encode((), dst);
 
             Ok(())
