@@ -14,6 +14,7 @@ impl io::Write for WriteByteCounter {
         Ok(())
     }
 }
+
 #[derive(Debug, Clone, Default)]
 pub struct WriteCodepointCounter {
     codepoints: usize,
