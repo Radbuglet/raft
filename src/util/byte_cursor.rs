@@ -105,7 +105,7 @@ impl<'a> ByteMutReadSession<'a> {
     }
 
     pub fn consume_cursor(&self, cursor: &ByteReadCursor) {
-        self.consume(cursor.read_count());
+        self.consume(cursor.pos());
     }
 }
 
@@ -148,7 +148,7 @@ impl<'a> ByteReadCursor<'a> {
         self.remaining
     }
 
-    pub fn read_count(&self) -> usize {
+    pub fn pos(&self) -> usize {
         self.original.len() - self.remaining.len()
     }
 
@@ -158,10 +158,6 @@ impl<'a> ByteReadCursor<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.remaining.is_empty()
-    }
-
-    pub fn advance(&mut self, count: usize) {
-        self.remaining = &self.remaining[count..];
     }
 
     pub fn advance_remaining(&mut self) {
@@ -174,7 +170,7 @@ impl<'a> ByteReadCursor<'a> {
 
     pub fn read_slice(&mut self, count: usize) -> Option<&'a [u8]> {
         let res = self.remaining.get(0..count)?;
-        self.advance(count);
+        self.remaining = &self.remaining[count..];
 
         Some(res)
     }
@@ -184,7 +180,7 @@ impl<'a> ByteReadCursor<'a> {
     }
 
     pub fn format_location(&self) -> impl fmt::Display {
-        let read_count = self.read_count();
+        let read_count = self.pos();
         lazy_format!("{read_count} byte(s) from the packet frame start")
     }
 }

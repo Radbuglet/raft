@@ -160,18 +160,43 @@ pub trait DeserializeFor<C: Codec, A>: Deserialize<C> {
     /// Validates and summarizes an encoded byte stream, leaving the `cursor` head at the position of
     /// the next item if it exists.
     fn summarize(
-        meta: &mut Meta,
         cursor: &mut ByteReadCursor,
-        args: A,
+        meta: &mut Meta,
+        args: &mut A,
     ) -> anyhow::Result<Self::Summary>;
 
     /// Produces a user-friendly view of a summary. It should always be valid to construct this view
     /// since summarization should have already performed all the necessary validation.
-    fn view<'a>(summary: &'a Self::Summary, info: DeserializeInfo<'a>, args: A) -> Self::View<'a>;
+    fn view<'a>(
+        summary: &'a Self::Summary,
+        info: DeserializeInfo<'a>,
+        args: &mut A,
+    ) -> Self::View<'a>;
 
     /// Returns the absolute byte-position of the object right after this one given its own absolute
     /// starting byte-position.
-    fn end(summary: &Self::Summary, info: DeserializeInfo<'_>, args: A) -> usize;
+    fn end(summary: &Self::Summary, info: DeserializeInfo<'_>, args: &mut A) -> usize;
+
+    /// Decodes the reified version of this value in a single pass.
+    fn decode<'a>(
+        cursor: &'a mut ByteReadCursor,
+        meta: &'a mut Meta,
+        args: &mut A,
+    ) -> anyhow::Result<Self> {
+        let start = cursor.pos();
+        let summary = Self::summarize(cursor, meta, args)?;
+        let view = Self::view(
+            &summary,
+            DeserializeInfo {
+                start,
+                meta,
+                stream: cursor.original(),
+            },
+            args,
+        );
+
+        Ok(view.into())
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -181,7 +206,15 @@ pub struct DeserializeInfo<'a> {
     pub stream: &'a [u8],
 }
 
-impl DeserializeInfo<'_> {
+impl<'a> DeserializeInfo<'a> {
+    pub fn from_cursor(cursor: &ByteReadCursor<'a>, meta: &'a Meta) -> Self {
+        Self {
+            start: cursor.pos(),
+            meta,
+            stream: cursor.original(),
+        }
+    }
+
     pub fn with_start(self, start: usize) -> Self {
         Self {
             start,
@@ -195,14 +228,87 @@ impl DeserializeInfo<'_> {
     }
 }
 
+// === DeserializeForSimples === //
+
+pub trait DeserializeForSimple<C: Codec, A>: 'static + Deserialize<C> {
+    fn decode_simple<'a>(
+        cursor: &mut ByteReadCursor<'a>,
+        args: &mut A,
+    ) -> anyhow::Result<Self::View<'a>>;
+}
+
+pub trait SimpleSummary: 'static + fmt::Debug + Copy {
+    fn from_pos(pos: usize) -> Self;
+
+    fn detect_end<C, A, T>(self, cursor: &mut ByteReadCursor, args: &mut A) -> usize
+    where
+        C: Codec,
+        T: DeserializeForSimple<C, A>;
+}
+
+impl SimpleSummary for () {
+    fn from_pos(_pos: usize) -> Self {
+        ()
+    }
+
+    fn detect_end<C, A, T>(self, cursor: &mut ByteReadCursor, args: &mut A) -> usize
+    where
+        C: Codec,
+        T: DeserializeForSimple<C, A>,
+    {
+        let _ = T::decode_simple(cursor, args);
+        cursor.pos()
+    }
+}
+
+impl SimpleSummary for usize {
+    fn from_pos(pos: usize) -> Self {
+        pos
+    }
+
+    fn detect_end<C, A, T>(self, _cursor: &mut ByteReadCursor, _args: &mut A) -> usize
+    where
+        C: Codec,
+        T: DeserializeForSimple<C, A>,
+    {
+        self
+    }
+}
+
+impl<C, A, T> DeserializeFor<C, A> for T
+where
+    C: Codec,
+    T: DeserializeForSimple<C, A>,
+    T::Summary: SimpleSummary,
+{
+    fn summarize(
+        cursor: &mut ByteReadCursor,
+        _meta: &mut Meta,
+        args: &mut A,
+    ) -> anyhow::Result<Self::Summary> {
+        Self::decode_simple(cursor, args)?;
+        Ok(SimpleSummary::from_pos(cursor.pos()))
+    }
+
+    fn view<'a>(
+        _summary: &'a Self::Summary,
+        info: DeserializeInfo<'a>,
+        args: &mut A,
+    ) -> Self::View<'a> {
+        Self::decode_simple(&mut ByteReadCursor::new(&info.stream[info.start..]), args).unwrap()
+    }
+
+    fn end(summary: &Self::Summary, info: DeserializeInfo<'_>, args: &mut A) -> usize {
+        summary.detect_end::<C, A, T>(&mut ByteReadCursor::new(&info.stream[info.start..]), args)
+    }
+}
+
 // === Serialize === //
 
-pub trait SerializeInto<C: Codec, T>: Sized {}
+pub trait SerializeInto<C: Codec, T, A> {
+    fn serialize(&self, stream: &mut impl Write, args: &mut A) -> anyhow::Result<()>;
 
-pub trait SerializeIntoFor<C: Codec, T, A>: SerializeInto<C, T> {
-    fn serialize(&self, stream: &mut impl Write, args: A) -> anyhow::Result<()>;
-
-    fn length(&self, args: A) -> anyhow::Result<usize> {
+    fn length(&self, args: &mut A) -> anyhow::Result<usize> {
         let mut counter = WriteByteCounter::default();
         self.serialize(&mut counter, args)?;
         Ok(counter.0)
@@ -213,9 +319,7 @@ pub trait SerializeIntoFor<C: Codec, T, A>: SerializeInto<C, T> {
 
 pub mod codec_struct_internals {
     pub use {
-        super::{
-            Deserialize, DeserializeFor, DeserializeInfo, Meta, SerializeInto, SerializeIntoFor,
-        },
+        super::{Deserialize, DeserializeFor, DeserializeInfo, Meta, SerializeInto},
         crate::util::byte_cursor::ByteReadCursor,
         anyhow,
         std::{
@@ -274,24 +378,26 @@ macro_rules! codec_struct {
 
             impl $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ()> for $struct_name {
                 fn summarize(
-                    meta: &mut $crate::util::byte_codec::codec_struct_internals::Meta,
                     cursor: &mut $crate::util::byte_codec::codec_struct_internals::ByteReadCursor,
-                    _args: (),
+					meta: &mut $crate::util::byte_codec::codec_struct_internals::Meta,
+                    _args: &mut (),
                 ) -> $crate::util::byte_codec::codec_struct_internals::anyhow::Result<Self::Summary> {
-                    $crate::util::byte_codec::codec_struct_internals::Ok(Self::Summary {
+					let _ = (&meta, &cursor);
+
+                    $crate::util::byte_codec::codec_struct_internals::Ok(Summary {$(
 						#[allow(unused_parens)]
-                        $($field_name: <$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor::<$codec, ($($config_ty)?)>>::summarize(
-                            meta,
+						$field_name: <$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor::<$codec, ($($config_ty)?)>>::summarize(
                             cursor,
-                            {$($config)?},
-                        )?,)*
-                    })
+							meta,
+                            &mut {$($config)?},
+                        )?,
+					)*})
                 }
 
                 fn view<'a>(
                     summary: &'a Self::Summary,
                     info: $crate::util::byte_codec::codec_struct_internals::DeserializeInfo<'a>,
-                    _args: (),
+                    _args: &mut (),
                 ) -> Self::View<'a> {
                     Self::View { summary, info }
                 }
@@ -299,15 +405,17 @@ macro_rules! codec_struct {
                 fn end(
                     summary: &Self::Summary,
                     info: $crate::util::byte_codec::codec_struct_internals::DeserializeInfo<'_>,
-                    _args: (),
+                    _args: &mut (),
                 ) -> $crate::util::byte_codec::codec_struct_internals::usize {
+					let _ = summary;
+
 					let offset = info.start;
                     $(
 						#[allow(unused_parens)]
                         let offset = <$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::end(
                             &summary.$field_name,
                             info.with_start(offset),
-                            {$($config)?},
+                            &mut {$($config)?},
                         );
                     )*
 
@@ -323,12 +431,14 @@ macro_rules! codec_struct {
 			impl View<'_> {
 				fn offsets(&self) -> OffsetsTmp {
 					let offset = self.info.start;
+					let _ = &offset;
+
                     $(
 						#[allow(unused_parens)]
                         let offset = <$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::end(
                             &self.summary.$field_name,
                             self.info.with_start(offset),
-                            {$($config)?},
+                            &mut {$($config)?},
                         );
 						let $field_name = offset;
                     )*
@@ -344,7 +454,7 @@ macro_rules! codec_struct {
 					<$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::view(
 						&self.summary.$field_name,
 						self.info.with_start(offset),
-						{$($config)?},
+						&mut {$($config)?},
 					)
                 }
             )*}
@@ -352,6 +462,8 @@ macro_rules! codec_struct {
             // View reification
             impl $crate::util::byte_codec::codec_struct_internals::From<View<'_>> for $struct_name {
                 fn from(view: View<'_>) -> Self {
+					let _ = &view;
+
                     Self {
                         $($field_name: $crate::util::byte_codec::codec_struct_internals::From::from(view.$field_name()),)*
                     }
@@ -371,25 +483,20 @@ macro_rules! codec_struct {
             }
 
             // Serialization
-            #[allow(non_camel_case_types)]
-            impl<$($field_name,)*> $crate::util::byte_codec::codec_struct_internals::SerializeInto<$codec, $struct_name> for Builder<$($field_name,)*>
-            where
-                $($field_name: $crate::util::byte_codec::codec_struct_internals::SerializeInto<$codec, $field_ty>,)*
-            {
-            }
-
             #[allow(non_camel_case_types, unused_parens)]
-            impl<$($field_name,)*> $crate::util::byte_codec::codec_struct_internals::SerializeIntoFor<$codec, $struct_name, ()> for Builder<$($field_name,)*>
+            impl<$($field_name,)*> $crate::util::byte_codec::codec_struct_internals::SerializeInto<$codec, $struct_name, ()> for Builder<$($field_name,)*>
             where
-                $($field_name: $crate::util::byte_codec::codec_struct_internals::SerializeIntoFor<$codec, $field_ty, ($($config_ty)?)>,)*
+                $($field_name: $crate::util::byte_codec::codec_struct_internals::SerializeInto<$codec, $field_ty, ($($config_ty)?)>,)*
             {
                 fn serialize(
 					&self,
 					stream: &mut impl $crate::util::byte_codec::codec_struct_internals::Write,
-					_args: (),
+					_args: &mut (),
 				) -> $crate::util::byte_codec::codec_struct_internals::anyhow::Result<()> {
+					let _ = &stream;
+
 					$(
-						$crate::util::byte_codec::codec_struct_internals::SerializeIntoFor::<$codec, $field_ty, ($($config_ty)?)>::serialize(
+						$crate::util::byte_codec::codec_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::serialize(
 							&self.$field_name,
 							stream,
 							{$($config)?},
@@ -399,9 +506,9 @@ macro_rules! codec_struct {
 					$crate::util::byte_codec::codec_struct_internals::Ok(())
 				}
 
-                fn length(&self, _args: ()) -> $crate::util::byte_codec::codec_struct_internals::anyhow::Result<$crate::util::byte_codec::codec_struct_internals::usize> {
+                fn length(&self, _args: &mut ()) -> $crate::util::byte_codec::codec_struct_internals::anyhow::Result<$crate::util::byte_codec::codec_struct_internals::usize> {
                     $crate::util::byte_codec::codec_struct_internals::Ok(
-						0 $(+ $crate::util::byte_codec::codec_struct_internals::SerializeIntoFor::<$codec, $field_ty, ($($config_ty)?)>::length(
+						0 $(+ $crate::util::byte_codec::codec_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::length(
 							&self.$field_name,
 							{$($config)?},
 						)?)*

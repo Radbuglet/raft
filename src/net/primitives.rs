@@ -103,14 +103,14 @@ macro_rules! codec_struct {
 					$crate::net::primitives::codec_struct_internals::type_name::<Self>(),
 				);
 				$(
-					let start_offset = cursor.read_count();
+					let start_offset = cursor.pos();
 					let $field_name = $crate::net::primitives::codec_struct_internals::Codec::decode({ $($config)? }, src, cursor)?;
 					$crate::net::primitives::codec_struct_internals::trace!(
 						"\tDecoded {}: {:?} (ending offset: {}..{})",
 						$crate::net::primitives::codec_struct_internals::stringify!($field_name),
 						$field_name,
 						start_offset,
-						cursor.read_count(),
+						cursor.pos(),
 					);
 				)*
 				$crate::net::primitives::codec_struct_internals::Ok(Self { $($field_name,)* })
