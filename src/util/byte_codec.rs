@@ -499,7 +499,7 @@ macro_rules! codec_struct {
 						$crate::util::byte_codec::codec_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::serialize(
 							&self.$field_name,
 							stream,
-							{$($config)?},
+							&mut {$($config)?},
 						)?;
 					)*
 
@@ -510,11 +510,13 @@ macro_rules! codec_struct {
                     $crate::util::byte_codec::codec_struct_internals::Ok(
 						0 $(+ $crate::util::byte_codec::codec_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::length(
 							&self.$field_name,
-							{$($config)?},
+							&mut {$($config)?},
 						)?)*
 					)
                 }
             }
+
+			// TODO: Ensure that reified form can also serialize.
         }
 
         #[allow(unused_imports)]
