@@ -1,14 +1,18 @@
-use std::{io, mem, str};
+use std::{
+    fmt,
+    io::{self, Write},
+    marker::PhantomData,
+    mem, str,
+};
 
 use anyhow::Context;
 use bytes::Bytes;
 
 use crate::util::{
-    byte_codec::{
-        Codec, Deserialize, DeserializeFor, DeserializeForSimple, NoExternalCall, SerializeInto,
-    },
+    byte_codec::{Codec, Deserialize, DeserializeFor, DeserializeForSimple, SerializeInto},
     byte_cursor::ByteReadCursor,
     var_int::{decode_var_i32_streaming, encode_var_u32},
+    write::WriteCodepointCounter,
 };
 
 pub struct MineCodec {
@@ -76,7 +80,7 @@ impl DeserializeForSimple<MineCodec, ()> for bool {
 
 impl SerializeInto<MineCodec, bool, ()> for bool {
     fn serialize(&self, stream: &mut impl io::Write, args: &mut ()) -> anyhow::Result<()> {
-        (*self as u8).serialize(stream, args)
+        (*self as u8).serialize_annotated(PhantomData::<u8>, stream, args)
     }
 }
 
@@ -250,29 +254,14 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
         })?;
 
         // Validate bytes
-        let codepoints = {
-            let mut buffer = [0u8; 4];
-            let mut buffer_offset = 0;
-            let mut codepoints = 0;
-
-            for &byte in data {
-                buffer[buffer_offset] = byte;
-
-                if std::str::from_utf8(&buffer[0..buffer_offset]).is_ok() {
-                    buffer_offset = 0;
-                    codepoints += 1;
-                } else {
-                    buffer_offset += 1;
-                    anyhow::ensure!(
-                        buffer_offset < 4,
-                        "Failed to validate string ending at location {}",
-                        cursor.format_location()
-                    );
-                }
-            }
-
-            codepoints
-        };
+        let mut codepoints = WriteCodepointCounter::default();
+        codepoints.write_all(data)?;
+        let codepoints = codepoints.codepoints().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to validate string ending at location {}",
+                cursor.format_location()
+            )
+        })?;
 
         if let Some(max_len) = *max_len {
             if codepoints > max_len as usize {
@@ -287,30 +276,128 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
         Ok(start_pos)
     }
 
-    fn view_<'a>(
-        _no_external_call: NoExternalCall,
+    unsafe fn view<'a>(
         summary: &'a Self::Summary,
         cursor: ByteReadCursor<'a>,
         _args: &mut Option<u32>,
     ) -> Self::View<'a> {
-        let mut cursor = cursor.with_offset(*summary);
+        let mut cursor = cursor.with_pos(*summary);
         let size = VarUint::decode_simple(&mut cursor, &mut ()).unwrap();
         let data = cursor.read_slice(size as usize).unwrap();
 
-        unsafe {
-            // Safety: `summarize` already validated that parsing from the `*summary` buffer location
-            // on its corresponding buffer (guaranteed by safety invariants) onwards will result in
-            // a valid string being constructed, allowing us to skip the validation step.
-            str::from_utf8_unchecked(data)
-        }
+        // Safety: `summarize` already validated that parsing from the `*summary` buffer location
+        // on its corresponding buffer (guaranteed by safety invariants) onwards will result in
+        // a valid string being constructed, allowing us to skip the validation step.
+        str::from_utf8_unchecked(data)
     }
 
-    fn end(summary: &Self::Summary, cursor: ByteReadCursor, _args: &mut Option<u32>) -> usize {
-        let mut cursor = cursor.with_offset(*summary);
-        let byte_len = VarInt::decode_simple(&mut cursor, &mut ()).unwrap();
+    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, _args: &mut Option<u32>) {
+        debug_assert_eq!(cursor.pos(), *summary);
+        let byte_len = VarInt::decode_simple(cursor, &mut ()).unwrap();
         let _ = cursor.read_slice(byte_len as usize);
-        cursor.pos()
     }
 }
 
-// TODO: Serialization
+impl<T: fmt::Display> SerializeInto<MineCodec, String, Option<u32>> for T {
+    fn serialize(&self, stream: &mut impl io::Write, args: &mut Option<u32>) -> anyhow::Result<()> {
+        // Determine the size of the string.
+        let mut counter = WriteCodepointCounter::default();
+        write!(&mut counter, "{self}")?;
+
+        // Validate length
+        if let Some(max_len) = *args {
+            let curr_len = counter.codepoints().unwrap();
+            anyhow::ensure!(
+				curr_len <= max_len as usize,
+				"String {:?} has a max length of {max_len} codepoint(s) but was {curr_len} codepoint(s) long.",
+				self.to_string(),
+			);
+        }
+
+        // Write out the packet
+        let len = i32::try_from(counter.bytes())
+            .map_err(|_| anyhow::anyhow!("String max length overflew an i32."))?;
+
+        VarInt(len).serialize(stream, &mut ())?;
+        write!(stream, "{self}")?;
+
+        Ok(())
+    }
+}
+
+impl DeserializeFor<MineCodec, u32> for String {
+    fn summarize(cursor: &mut ByteReadCursor, args: &mut u32) -> anyhow::Result<Self::Summary> {
+        Self::summarize(cursor, &mut Some(*args))
+    }
+
+    unsafe fn view<'a>(
+        summary: &'a Self::Summary,
+        cursor: ByteReadCursor<'a>,
+        args: &mut u32,
+    ) -> Self::View<'a> {
+        Self::view(summary, cursor, &mut Some(*args))
+    }
+
+    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, args: &mut u32) {
+        Self::skip(summary, cursor, &mut Some(*args))
+    }
+}
+
+impl<T: fmt::Display> SerializeInto<MineCodec, String, u32> for T {
+    fn serialize(&self, stream: &mut impl Write, args: &mut u32) -> anyhow::Result<()> {
+        self.serialize(stream, &mut Some(*args))
+    }
+}
+
+// Identifier
+#[derive(Debug, Clone)]
+pub struct Identifier(pub String);
+
+impl Identifier {
+    pub const MAX_LEN: u32 = 32767;
+}
+
+impl fmt::Display for Identifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&'_ str> for Identifier {
+    fn from(value: &'_ str) -> Self {
+        Self(String::from(value))
+    }
+}
+
+impl Deserialize<MineCodec> for Identifier {
+    type Summary = <String as Deserialize<MineCodec>>::Summary;
+    type View<'a> = &'a str;
+}
+
+impl DeserializeFor<MineCodec, ()> for Identifier {
+    fn summarize(cursor: &mut ByteReadCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
+        String::summarize(cursor, &mut Some(Self::MAX_LEN))
+    }
+
+    unsafe fn view<'a>(
+        summary: &'a Self::Summary,
+        cursor: ByteReadCursor<'a>,
+        _args: &mut (),
+    ) -> Self::View<'a> {
+        String::view(summary, cursor, &mut Some(Self::MAX_LEN))
+    }
+
+    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, _args: &mut ()) {
+        String::skip(summary, cursor, &mut Some(Self::MAX_LEN))
+    }
+}
+
+impl<T: fmt::Display> SerializeInto<MineCodec, Identifier, ()> for T {
+    fn serialize(&self, stream: &mut impl Write, _args: &mut ()) -> anyhow::Result<()> {
+        self.serialize_annotated(
+            PhantomData::<String>,
+            stream,
+            &mut Some(Identifier::MAX_LEN),
+        )
+    }
+}

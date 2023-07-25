@@ -140,13 +140,6 @@ impl<'a> ByteReadCursor<'a> {
         }
     }
 
-    pub fn with_offset(self, offset: usize) -> Self {
-        Self {
-            original: self.original,
-            remaining: &self.original[offset..],
-        }
-    }
-
     pub fn original(&self) -> &'a [u8] {
         self.original
     }
@@ -157,6 +150,16 @@ impl<'a> ByteReadCursor<'a> {
 
     pub fn pos(&self) -> usize {
         self.original.len() - self.remaining.len()
+    }
+
+    pub fn set_pos(&mut self, pos: usize) {
+        self.remaining = &self.original[pos..];
+    }
+
+    pub fn with_pos(self, pos: usize) -> Self {
+        let mut fork = self.clone();
+        fork.set_pos(pos);
+        fork
     }
 
     pub fn len(&self) -> usize {
