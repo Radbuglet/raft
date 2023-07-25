@@ -4,7 +4,9 @@ use anyhow::Context;
 use bytes::Bytes;
 
 use crate::util::{
-    byte_codec::{Codec, Deserialize, DeserializeFor, DeserializeForSimple, SerializeInto},
+    byte_codec::{
+        Codec, Deserialize, DeserializeFor, DeserializeForSimple, NoExternalCall, SerializeInto,
+    },
     byte_cursor::ByteReadCursor,
     var_int::{decode_var_i32_streaming, encode_var_u32},
 };
@@ -203,8 +205,7 @@ impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
 
 // String
 impl Deserialize<MineCodec> for String {
-    // TODO: Don't copy strings for validation sake! (maybe add some slice authenticity check?)
-    type Summary = (Box<str>, usize);
+    type Summary = usize;
     type View<'a> = &'a str;
 }
 
@@ -213,6 +214,7 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
         cursor: &mut ByteReadCursor,
         max_len: &mut Option<u32>,
     ) -> anyhow::Result<Self::Summary> {
+        let start_pos = cursor.pos();
         let size = VarUint::decode_simple(cursor, &mut ())?;
 
         // Validate length
@@ -247,40 +249,67 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
             )
         })?;
 
-        // Decode bytes
-        let data = str::from_utf8(data).map_err(|err| {
-            anyhow::anyhow!(err).context(format!(
-                "String byte data was not valid UTF8 (location: {}).",
-                cursor.format_location(),
-            ))
-        })?;
+        // Validate bytes
+        let codepoints = {
+            let mut buffer = [0u8; 4];
+            let mut buffer_offset = 0;
+            let mut codepoints = 0;
 
-        // Validate string
-        // TODO: Do this in one pass.
+            for &byte in data {
+                buffer[buffer_offset] = byte;
+
+                if std::str::from_utf8(&buffer[0..buffer_offset]).is_ok() {
+                    buffer_offset = 0;
+                    codepoints += 1;
+                } else {
+                    buffer_offset += 1;
+                    anyhow::ensure!(
+                        buffer_offset < 4,
+                        "Failed to validate string ending at location {}",
+                        cursor.format_location()
+                    );
+                }
+            }
+
+            codepoints
+        };
+
         if let Some(max_len) = *max_len {
-            let actual_len = data.chars().count();
-            if actual_len > max_len as usize {
+            if codepoints > max_len as usize {
                 anyhow::bail!(
                     "String is too long: can contain at most {max_len} codepoint(s) but \
-					 contains {actual_len} (location: {}).",
+					 contains {codepoints} (location: {}).",
                     cursor.format_location(),
                 );
             }
         }
 
-        Ok((Box::from(data), cursor.pos()))
+        Ok(start_pos)
     }
 
-    fn view<'a>(
+    fn view_<'a>(
+        _no_external_call: NoExternalCall,
         summary: &'a Self::Summary,
-        _cursor: ByteReadCursor<'a>,
+        cursor: ByteReadCursor<'a>,
         _args: &mut Option<u32>,
     ) -> Self::View<'a> {
-        &summary.0
+        let mut cursor = cursor.with_offset(*summary);
+        let size = VarUint::decode_simple(&mut cursor, &mut ()).unwrap();
+        let data = cursor.read_slice(size as usize).unwrap();
+
+        unsafe {
+            // Safety: `summarize` already validated that parsing from the `*summary` buffer location
+            // on its corresponding buffer (guaranteed by safety invariants) onwards will result in
+            // a valid string being constructed, allowing us to skip the validation step.
+            str::from_utf8_unchecked(data)
+        }
     }
 
-    fn end(summary: &Self::Summary, _cursor: ByteReadCursor, _args: &mut Option<u32>) -> usize {
-        summary.1
+    fn end(summary: &Self::Summary, cursor: ByteReadCursor, _args: &mut Option<u32>) -> usize {
+        let mut cursor = cursor.with_offset(*summary);
+        let byte_len = VarInt::decode_simple(&mut cursor, &mut ()).unwrap();
+        let _ = cursor.read_slice(byte_len as usize);
+        cursor.pos()
     }
 }
 
