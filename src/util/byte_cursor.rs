@@ -140,6 +140,13 @@ impl<'a> ByteReadCursor<'a> {
         }
     }
 
+    pub fn with_offset(self, offset: usize) -> Self {
+        Self {
+            original: self.original,
+            remaining: &self.original[offset..],
+        }
+    }
+
     pub fn original(&self) -> &'a [u8] {
         self.original
     }

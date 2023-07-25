@@ -4,10 +4,7 @@ use anyhow::Context;
 use bytes::Bytes;
 
 use crate::util::{
-    byte_codec::{
-        Codec, Deserialize, DeserializeFor, DeserializeForSimple, DeserializeInfo, Meta,
-        SerializeInto,
-    },
+    byte_codec::{Codec, Deserialize, DeserializeFor, DeserializeForSimple, SerializeInto},
     byte_cursor::ByteReadCursor,
     var_int::{decode_var_i32_streaming, encode_var_u32},
 };
@@ -214,7 +211,6 @@ impl Deserialize<MineCodec> for String {
 impl DeserializeFor<MineCodec, Option<u32>> for String {
     fn summarize(
         cursor: &mut ByteReadCursor,
-        _meta: &mut Meta,
         max_len: &mut Option<u32>,
     ) -> anyhow::Result<Self::Summary> {
         let size = VarUint::decode_simple(cursor, &mut ())?;
@@ -226,7 +222,7 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
                 .filter(|&v| i32::try_from(v).is_ok())
                 .unwrap_or_else(|| {
                     panic!(
-						"NetStrings with a maximum codepoint length of {max_len} are untenable due to \
+						"Strings with a maximum codepoint length of {max_len} are untenable due to \
 						 encoding constraints."
 					)
                 });
@@ -277,13 +273,13 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
 
     fn view<'a>(
         summary: &'a Self::Summary,
-        _info: DeserializeInfo<'a>,
+        _cursor: ByteReadCursor<'a>,
         _args: &mut Option<u32>,
     ) -> Self::View<'a> {
         &summary.0
     }
 
-    fn end(summary: &Self::Summary, _info: DeserializeInfo<'_>, _args: &mut Option<u32>) -> usize {
+    fn end(summary: &Self::Summary, _cursor: ByteReadCursor, _args: &mut Option<u32>) -> usize {
         summary.1
     }
 }
