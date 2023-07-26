@@ -3,7 +3,7 @@ use super::primitives::{
 };
 use super::transport::{FramedPacket, UnframedPacket};
 
-use crate::util::byte_cursor::{ByteReadCursor, Snip};
+use crate::util::byte_stream::{ByteCursor, Snip};
 
 use bytes::{BufMut, Bytes};
 use std::any::type_name;
@@ -35,7 +35,7 @@ macro_rules! derive_protocol {
 
 			impl Codec<()> for Packet {
 				#[allow(unused_variables)]
-				fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+				fn decode(_args: (), src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
 					let id = VarInt::decode((), src, cursor)?.0;
 
 					match id {

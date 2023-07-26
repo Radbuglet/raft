@@ -6,8 +6,7 @@ use smallvec::SmallVec;
 
 use crate::util::{
     bits::{i32_from_u32_2c, i32_to_u32_2c, StaticBitSet},
-    byte_cursor::{ByteReadCursor, Snip},
-    write::WriteByteCounter,
+    byte_stream::{ByteCursor, Snip, WriteByteCounter},
 };
 
 const TOO_BIG_ERR: &str = "byte array is too big to send over the network";
@@ -17,7 +16,7 @@ const TOO_BIG_ERR: &str = "byte array is too big to send over the network";
 pub type StreamingDecodeResult<T> = anyhow::Result<Option<T>>;
 
 pub trait StreamingCodec: SizedCodec<()> {
-    fn decode_streaming(cursor: &mut ByteReadCursor) -> StreamingDecodeResult<Self>;
+    fn decode_streaming(cursor: &mut ByteCursor) -> StreamingDecodeResult<Self>;
 
     fn encode_streaming(&self, cursor: &mut impl BufMut);
 }
@@ -27,12 +26,12 @@ pub trait SizedCodec<A>: Codec<A> {
 }
 
 pub trait Codec<A>: Sized {
-    fn decode(args: A, src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self>;
+    fn decode(args: A, src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self>;
 
     fn encode(&self, args: A, cursor: &mut impl BufMut);
 
     fn decode_bytes(args: A, bytes: &Bytes) -> anyhow::Result<Self> {
-        Self::decode(args, bytes, &mut ByteReadCursor::new(bytes))
+        Self::decode(args, bytes, &mut ByteCursor::new(bytes))
     }
 }
 
@@ -48,7 +47,7 @@ pub fn size_of_tiny<const MAX_SIZE: usize>(body: &impl StreamingCodec) -> usize 
 }
 
 impl<T: StreamingCodec> Codec<()> for T {
-    fn decode(_args: (), _snip: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(_args: (), _snip: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         match Self::decode_streaming(cursor)? {
             Some(value) => Ok(value),
             None => anyhow::bail!(
@@ -70,7 +69,7 @@ impl<T: StreamingCodec> Codec<()> for T {
 pub mod codec_struct_internals {
     pub use {
         super::{Codec, SizedCodec},
-        crate::util::byte_cursor::{ByteReadCursor, Snip},
+        crate::util::byte_stream::{ByteCursor, Snip},
         anyhow::Result,
         bytes::BufMut,
         log::trace,
@@ -96,7 +95,7 @@ macro_rules! codec_struct {
             fn decode(
 				_args: (),
                 src: &impl $crate::net::primitives::codec_struct_internals::Snip,
-                cursor: &mut $crate::net::primitives::codec_struct_internals::ByteReadCursor,
+                cursor: &mut $crate::net::primitives::codec_struct_internals::ByteCursor,
             ) -> $crate::net::primitives::codec_struct_internals::Result<Self> {
 				log::trace!(
 					"Decoding {}...",
@@ -143,7 +142,7 @@ pub(crate) use codec_struct;
 // === Streaming Primitives === //
 
 impl StreamingCodec for bool {
-    fn decode_streaming(cursor: &mut ByteReadCursor) -> StreamingDecodeResult<Self> {
+    fn decode_streaming(cursor: &mut ByteCursor) -> StreamingDecodeResult<Self> {
         let bytes = u8::decode_streaming(cursor)?;
 
         match bytes {
@@ -174,7 +173,7 @@ impl SizedCodec<()> for bool {
 macro_rules! impl_prim {
     ($($ty:ty),*$(,)?) => {$(
 		impl StreamingCodec for $ty {
-			fn decode_streaming(cursor: &mut ByteReadCursor) -> StreamingDecodeResult<Self> {
+			fn decode_streaming(cursor: &mut ByteCursor) -> StreamingDecodeResult<Self> {
 				if let Some(bytes) = cursor.read_arr() {
 					Ok(Some(<$ty>::from_be_bytes(bytes)))
 				} else {
@@ -202,7 +201,7 @@ pub struct VarInt(pub i32);
 
 // Adapted from: https://wiki.vg/index.php?title=Protocol&oldid=18305#VarInt_and_VarLong
 impl StreamingCodec for VarInt {
-    fn decode_streaming(cursor: &mut ByteReadCursor) -> StreamingDecodeResult<Self> {
+    fn decode_streaming(cursor: &mut ByteCursor) -> StreamingDecodeResult<Self> {
         let mut accum = 0u32;
         let mut shift = 0;
 
@@ -255,7 +254,7 @@ impl SizedCodec<()> for VarInt {
 pub struct VarUint(pub u32);
 
 impl StreamingCodec for VarUint {
-    fn decode_streaming(cursor: &mut ByteReadCursor) -> StreamingDecodeResult<Self> {
+    fn decode_streaming(cursor: &mut ByteCursor) -> StreamingDecodeResult<Self> {
         let Some(value) = VarInt::decode_streaming(cursor)? else { return Ok(None) };
         let Ok(value) = u32::try_from(value.0) else {
 			anyhow::bail!(
@@ -285,7 +284,7 @@ impl SizedCodec<()> for VarUint {
 
 // Bytes
 impl Codec<()> for Bytes {
-    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         let bytes = src.freeze_range(cursor.remaining());
         cursor.advance_remaining();
         Ok(bytes)
@@ -349,7 +348,7 @@ impl Codec<Option<u32>> for NetString {
     fn decode(
         max_len: Option<u32>,
         snip: &impl Snip,
-        cursor: &mut ByteReadCursor,
+        cursor: &mut ByteCursor,
     ) -> anyhow::Result<Self> {
         let size = VarUint::decode((), snip, cursor)?.0;
 
@@ -431,7 +430,7 @@ impl SizedCodec<Option<u32>> for NetString {
 }
 
 impl Codec<u32> for NetString {
-    fn decode(max_len: u32, src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(max_len: u32, src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         Self::decode(Some(max_len), src, cursor)
     }
 
@@ -447,7 +446,7 @@ impl SizedCodec<u32> for NetString {
 }
 
 impl Codec<()> for NetString {
-    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         Self::decode(None, src, cursor)
     }
 
@@ -467,7 +466,7 @@ impl SizedCodec<()> for NetString {
 pub struct Identifier(pub NetString);
 
 impl Codec<()> for Identifier {
-    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         Ok(Self(NetString::decode(32767, src, cursor)?))
     }
 
@@ -491,7 +490,7 @@ pub trait SerializableJsonValue: serde::de::DeserializeOwned + serde::Serialize 
 }
 
 impl<E: SerializableJsonValue> Codec<()> for JsonValue<E> {
-    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         let input = NetString::decode(E::MAX_STR_LEN, src, cursor)?;
         let parsed = serde_json::from_str(&input)?;
 
@@ -651,7 +650,7 @@ pub struct ChatShownItem {
 
 // Option
 impl<A, T: Codec<A>> Codec<A> for Option<T> {
-    fn decode(args: A, src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(args: A, src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         Ok(if bool::decode((), src, cursor)? {
             Some(T::decode(args, src, cursor)?)
         } else {
@@ -684,7 +683,7 @@ impl<A, T: SizedCodec<A>> SizedCodec<A> for Option<T> {
 pub struct Uuid(pub u128);
 
 impl Codec<()> for Uuid {
-    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         Ok(Self(u128::decode((), src, cursor)?))
     }
 
@@ -704,7 +703,7 @@ impl SizedCodec<()> for Uuid {
 pub struct ByteArray(Bytes);
 
 impl Codec<()> for ByteArray {
-    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(_args: (), src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         let len = VarInt::decode((), src, cursor)?.0;
 
         let Some(data) = cursor.read_slice(len as usize) else {
@@ -736,7 +735,7 @@ where
     T: Codec<A>,
     F: FnMut() -> A,
 {
-    fn decode(mut args: F, src: &impl Snip, cursor: &mut ByteReadCursor) -> anyhow::Result<Self> {
+    fn decode(mut args: F, src: &impl Snip, cursor: &mut ByteCursor) -> anyhow::Result<Self> {
         let len = VarUint::decode((), src, cursor)?.0;
         let mut builder = Vec::with_capacity(len as usize);
 

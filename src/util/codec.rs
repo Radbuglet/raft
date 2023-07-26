@@ -1,36 +1,57 @@
-use std::{fmt, io::Write, marker::PhantomData};
-
-use super::{byte_cursor::ByteReadCursor, write::WriteByteCounter};
+use std::{error::Error, fmt};
 
 // === Common === //
 
-pub trait Codec: Sized + 'static {}
+pub trait Codec: Sized + 'static {
+    type Reader<'a>: ReadStream<Pos = Self::ReaderPos>;
+    type ReaderPos: ReadPos;
+
+    type WriteElement<'a>: ?Sized;
+
+    fn covariant_cast<'a: 'b, 'b>(reader: Self::Reader<'a>) -> Self::Reader<'b>;
+}
+
+pub trait ReadStream: Sized + Clone {
+    type Pos: ReadPos;
+
+    fn pos(&self) -> Self::Pos;
+
+    fn set_pos(&mut self, pos: Self::Pos);
+}
+
+pub trait ReadPos: Sized + 'static + Copy + Eq {}
+
+impl<T: 'static + Copy + Eq> ReadPos for T {}
+
+pub trait WriteStream<E: ?Sized> {
+    type Error: 'static + Error + Send + Sync;
+
+    fn push(&mut self, elem: &E) -> Result<(), Self::Error>;
+}
 
 // === Deserialize === //
 
-pub trait Deserialize<C: Codec>: Sized {
+pub trait Deserialize<C: Codec>: Sized + 'static {
     /// A summary of the deserialized contents. This includes enough information to:
     ///
     /// 1. Determine the position of sub-fields quickly given the starting position of the object.
-    /// 2. Decode its contents quickly given the backing byte array.
+    /// 2. Decode its contents quickly given the backing stream.
     /// 3. Determine the starting position of the next object quickly given the starting position of
     ///    this object.
     ///
-    type Summary: fmt::Debug + Clone;
+    type Summary: 'static + fmt::Debug + Clone;
 
     /// A user-friendly view into the contents of this object given a bound backing buffer.
     ///
     /// This view should be lazily evaluated and must provide a mechanism for reifying the view into
     /// its regular type.
-    type View<'a>: fmt::Debug + Copy + Into<Self>
-    where
-        Self: 'a;
+    type View<'a>: fmt::Debug + Into<Self>;
 }
 
 pub trait DeserializeFor<C: Codec, A>: Deserialize<C> {
-    /// Validates and summarizes an encoded byte stream, leaving the `cursor` head at the position of
+    /// Validates and summarizes an input stream, leaving the `cursor` head at the position of
     /// the next item if it exists.
-    fn summarize(cursor: &mut ByteReadCursor, args: &mut A) -> anyhow::Result<Self::Summary>;
+    fn summarize(cursor: &mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self::Summary>;
 
     /// Produces a user-friendly view of a summary. It should always be valid to construct this view
     /// since summarization should have already performed all the necessary validation.
@@ -54,20 +75,21 @@ pub trait DeserializeFor<C: Codec, A>: Deserialize<C> {
     ///
     unsafe fn view<'a>(
         summary: &'a Self::Summary,
-        cursor: ByteReadCursor<'a>,
+        cursor: C::Reader<'a>,
         args: &mut A,
     ) -> Self::View<'a>;
 
     /// Skips a cursor starting at the beginning of this element to the start of the next element.
-    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, args: &mut A);
+    fn skip(summary: &Self::Summary, cursor: &mut C::Reader<'_>, args: &mut A);
 
     /// Decodes the reified version of this value in a single pass.
-    fn decode<'a>(cursor: &'a mut ByteReadCursor, args: &mut A) -> anyhow::Result<Self> {
+    fn decode<'a>(cursor: &'a mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self> {
         let fork = cursor.clone();
         let summary = Self::summarize(cursor, args)?;
+
         let view = unsafe {
             // Safety: we just generated this summary with the appropriate cursor.
-            Self::view(&summary, fork, args)
+            Self::view(&summary, C::covariant_cast(fork), args)
         };
 
         Ok(view.into())
@@ -78,45 +100,45 @@ pub trait DeserializeFor<C: Codec, A>: Deserialize<C> {
 
 pub trait DeserializeForSimple<C: Codec, A>: 'static + Deserialize<C> {
     fn decode_simple<'a>(
-        cursor: &mut ByteReadCursor<'a>,
+        cursor: &mut C::Reader<'a>,
         args: &mut A,
     ) -> anyhow::Result<Self::View<'a>>;
 }
 
-pub trait SimpleSummary: 'static + fmt::Debug + Copy {
-    fn from_pos(pos: usize) -> Self;
+pub trait SimpleSummary<C: Codec>: ReadPos {
+    fn from_pos(pos: C::ReaderPos) -> Self;
 
-    fn skip_to_end<C, A, T>(self, cursor: &mut ByteReadCursor, args: &mut A)
+    fn skip_to_end<A, T>(self, cursor: &mut C::Reader<'_>, args: &mut A)
     where
-        C: Codec,
         T: DeserializeForSimple<C, A>;
 }
 
-impl SimpleSummary for () {
-    fn from_pos(_pos: usize) -> Self {
+impl<C: Codec> SimpleSummary<C> for () {
+    fn from_pos(_pos: C::ReaderPos) -> Self {
         ()
     }
 
-    fn skip_to_end<C, A, T>(self, cursor: &mut ByteReadCursor, args: &mut A)
+    fn skip_to_end<A, T>(self, cursor: &mut C::Reader<'_>, args: &mut A)
     where
-        C: Codec,
         T: DeserializeForSimple<C, A>,
     {
         let _ = T::decode_simple(cursor, args);
     }
 }
 
-impl SimpleSummary for usize {
-    fn from_pos(pos: usize) -> Self {
-        pos
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct EndPosSummary<P>(pub P);
+
+impl<C: Codec> SimpleSummary<C> for EndPosSummary<C::ReaderPos> {
+    fn from_pos(pos: C::ReaderPos) -> Self {
+        Self(pos)
     }
 
-    fn skip_to_end<C, A, T>(self, cursor: &mut ByteReadCursor, _args: &mut A)
+    fn skip_to_end<A, T>(self, cursor: &mut C::Reader<'_>, _args: &mut A)
     where
-        C: Codec,
         T: DeserializeForSimple<C, A>,
     {
-        cursor.set_pos(self);
+        cursor.set_pos(self.0);
     }
 }
 
@@ -124,59 +146,46 @@ impl<C, A, T> DeserializeFor<C, A> for T
 where
     C: Codec,
     T: DeserializeForSimple<C, A>,
-    T::Summary: SimpleSummary,
+    T::Summary: SimpleSummary<C>,
 {
-    fn summarize(cursor: &mut ByteReadCursor, args: &mut A) -> anyhow::Result<Self::Summary> {
+    fn summarize(cursor: &mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self::Summary> {
         Self::decode_simple(cursor, args)?;
         Ok(SimpleSummary::from_pos(cursor.pos()))
     }
 
     unsafe fn view<'a>(
         _summary: &'a Self::Summary,
-        cursor: ByteReadCursor<'a>,
+        cursor: C::Reader<'a>,
         args: &mut A,
     ) -> Self::View<'a> {
         Self::decode_simple(&mut cursor.clone(), args).unwrap()
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, args: &mut A) {
-        summary.skip_to_end::<C, A, T>(cursor, args)
+    fn skip(summary: &Self::Summary, cursor: &mut C::Reader<'_>, args: &mut A) {
+        summary.skip_to_end::<A, T>(cursor, args)
     }
 }
 
 // === Serialize === //
 
 pub trait SerializeInto<C: Codec, T, A>: Sized {
-    fn serialize(&self, stream: &mut impl Write, args: &mut A) -> anyhow::Result<()>;
-
-    fn serialize_annotated(
+    fn serialize(
         &self,
-        _ty: PhantomData<T>,
-        stream: &mut impl Write,
+        stream: &mut impl for<'a> WriteStream<C::WriteElement<'a>>,
         args: &mut A,
-    ) -> anyhow::Result<()> {
-        self.serialize(stream, args)
-    }
-
-    fn length(&self, args: &mut A) -> anyhow::Result<usize> {
-        let mut counter = WriteByteCounter::default();
-        self.serialize(&mut counter, args)?;
-        Ok(counter.0)
-    }
+    ) -> anyhow::Result<()>;
 }
 
 // === Struct === //
 
 pub mod codec_struct_internals {
     pub use {
-        super::{Deserialize, DeserializeFor, SerializeInto},
-        crate::util::byte_cursor::ByteReadCursor,
+        super::{Codec, Deserialize, DeserializeFor, ReadStream, SerializeInto, WriteStream},
         anyhow,
         std::{
+            clone::Clone,
             convert::{identity, From},
             fmt,
-            io::Write,
-            primitive::usize,
             result::Result::Ok,
             stringify,
         },
@@ -203,14 +212,14 @@ macro_rules! codec_struct {
 
             #[derive(Debug, Copy, Clone)]
             pub struct Summary {
-                $($field_name: <$field_ty as $crate::util::byte_codec::codec_struct_internals::Deserialize<$codec>>::Summary,)*
+                $($field_name: <$field_ty as $crate::util::codec::codec_struct_internals::Deserialize<$codec>>::Summary,)*
             }
 
-            #[derive(Copy, Clone)]
+            #[derive(Clone)]
             pub struct View<'a> {
 				// Safety invariant: the cursor and all the summary's elements have the same backing buffer.
                 summary: &'a Summary,
-                cursor: $crate::util::byte_codec::codec_struct_internals::ByteReadCursor<'a>,
+                cursor: <$codec as $crate::util::codec::codec_struct_internals::Codec>::Reader<'a>,
             }
 
             #[derive(Debug, Copy, Clone)]
@@ -220,23 +229,21 @@ macro_rules! codec_struct {
             }
 
             // Deserialization
-            impl $crate::util::byte_codec::codec_struct_internals::Deserialize<$codec> for $struct_name {
+            impl $crate::util::codec::codec_struct_internals::Deserialize<$codec> for $struct_name {
                 type Summary = Summary;
-                type View<'a> = View<'a>
-                where
-                    Self: 'a;
+                type View<'a> = View<'a>;
             }
 
-            impl $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ()> for $struct_name {
+            impl $crate::util::codec::codec_struct_internals::DeserializeFor<$codec, ()> for $struct_name {
                 fn summarize(
-                    cursor: &mut $crate::util::byte_codec::codec_struct_internals::ByteReadCursor,
+                    cursor: &mut <$codec as $crate::util::codec::codec_struct_internals::Codec>::Reader<'_>,
                     _args: &mut (),
-                ) -> $crate::util::byte_codec::codec_struct_internals::anyhow::Result<Self::Summary> {
+                ) -> $crate::util::codec::codec_struct_internals::anyhow::Result<Self::Summary> {
 					let _ = &cursor;
 
-                    $crate::util::byte_codec::codec_struct_internals::Ok(Summary {$(
+                    $crate::util::codec::codec_struct_internals::Ok(Summary {$(
 						#[allow(unused_parens)]
-						$field_name: <$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor::<$codec, ($($config_ty)?)>>::summarize(
+						$field_name: <$field_ty as $crate::util::codec::codec_struct_internals::DeserializeFor::<$codec, ($($config_ty)?)>>::summarize(
                             cursor,
                             &mut {$($config)?},
                         )?,
@@ -245,7 +252,7 @@ macro_rules! codec_struct {
 
                 unsafe fn view<'a>(
                     summary: &'a Self::Summary,
-                    cursor: $crate::util::byte_codec::codec_struct_internals::ByteReadCursor<'a>,
+                    cursor: <$codec as $crate::util::codec::codec_struct_internals::Codec>::Reader<'a>,
                     _args: &mut (),
                 ) -> Self::View<'a> {
 					// Safety: the caller guarantees that the summary was generated using this cursor's
@@ -255,45 +262,42 @@ macro_rules! codec_struct {
                     Self::View { summary, cursor }
                 }
 
-                fn end(
+                fn skip(
                     summary: &Self::Summary,
-                    cursor: $crate::util::byte_codec::codec_struct_internals::ByteReadCursor,
+                    cursor: &mut <$codec as $crate::util::codec::codec_struct_internals::Codec>::Reader<'_>,
                     _args: &mut (),
-                ) -> $crate::util::byte_codec::codec_struct_internals::usize {
-					let _ = summary;
+                ) {
+					let _ = (summary, &cursor);
 
-					let offset = cursor.pos();
                     $(
 						#[allow(unused_parens)]
-                        let offset = <$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::end(
+                        <$field_ty as $crate::util::codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::skip(
                             &summary.$field_name,
-                            cursor.with_pos(offset),
+                            cursor,
                             &mut {$($config)?},
                         );
                     )*
-
-                    offset
                 }
             }
 
             // View accessors
 			struct OffsetsTmp {
-				$($field_name: $crate::util::byte_codec::codec_struct_internals::usize,)*
+				$($field_name: <$codec as $crate::util::codec::codec_struct_internals::Codec>::ReaderPos,)*
 			}
 
 			impl View<'_> {
 				fn offsets(&self) -> OffsetsTmp {
-					let offset = self.cursor.pos();
-					let _ = &offset;
+					let mut cursor = $crate::util::codec::codec_struct_internals::Clone::clone(&self.cursor);
 
                     $(
+						let $field_name = $crate::util::codec::codec_struct_internals::ReadStream::pos(&cursor);
+
 						#[allow(unused_parens)]
-                        let offset = <$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::end(
+						<$field_ty as $crate::util::codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::skip(
                             &self.summary.$field_name,
-                            self.cursor.with_pos(offset),
+                            &mut cursor,
                             &mut {$($config)?},
                         );
-						let $field_name = offset;
                     )*
 
 					OffsetsTmp { $($field_name,)* }
@@ -301,18 +305,22 @@ macro_rules! codec_struct {
 			}
 
             impl<'a> View<'a> {$(
-                pub fn $field_name(&self) -> <$field_ty as $crate::util::byte_codec::codec_struct_internals::Deserialize<$codec>>::View<'a> {
+                pub fn $field_name(&self) -> <$field_ty as $crate::util::codec::codec_struct_internals::Deserialize<$codec>>::View<'a> {
 					let offset = self.offsets().$field_name;
-					let config = {$($config)?};
+					let mut config = {$($config)?};
+
+					let mut cursor = $crate::util::codec::codec_struct_internals::Clone::clone(&self.cursor);
+					$crate::util::codec::codec_struct_internals::ReadStream::set_pos(&mut cursor, offset);
 
 					unsafe {
 						// Safety: by invariant, we know the summary, its sub-element summaries, and
 						// its cursor were all derived from the same backing buffer, making this call
 						// valid. We know the config type is constant because `$config_ty` fixes it
 						// to a value.
-						<$field_ty as $crate::util::byte_codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::view(
+						#[allow(unused_parens)]
+						<$field_ty as $crate::util::codec::codec_struct_internals::DeserializeFor<$codec, ($($config_ty)?)>>::view(
 							&self.summary.$field_name,
-							self.cursor.with_pos(offset),
+							cursor,
 							&mut config,
 						)
 					}
@@ -320,22 +328,22 @@ macro_rules! codec_struct {
             )*}
 
             // View reification
-            impl $crate::util::byte_codec::codec_struct_internals::From<View<'_>> for $struct_name {
+            impl $crate::util::codec::codec_struct_internals::From<View<'_>> for $struct_name {
                 fn from(view: View<'_>) -> Self {
 					let _ = &view;
 
                     Self {
-                        $($field_name: $crate::util::byte_codec::codec_struct_internals::From::from(view.$field_name()),)*
+                        $($field_name: $crate::util::codec::codec_struct_internals::From::from(view.$field_name()),)*
                     }
                 }
             }
 
             // View formatting
-            impl $crate::util::byte_codec::codec_struct_internals::fmt::Debug for View<'_> {
-                fn fmt(&self, f: &mut $crate::util::byte_codec::codec_struct_internals::fmt::Formatter<'_>) -> $crate::util::byte_codec::codec_struct_internals::fmt::Result {
-                    f.debug_struct($crate::util::byte_codec::codec_struct_internals::stringify!($struct_name))
+            impl $crate::util::codec::codec_struct_internals::fmt::Debug for View<'_> {
+                fn fmt(&self, f: &mut $crate::util::codec::codec_struct_internals::fmt::Formatter<'_>) -> $crate::util::codec::codec_struct_internals::fmt::Result {
+                    f.debug_struct($crate::util::codec::codec_struct_internals::stringify!($struct_name))
                         $(.field(
-                            $crate::util::byte_codec::codec_struct_internals::stringify!($field_name),
+                            $crate::util::codec::codec_struct_internals::stringify!($field_name),
                             &self.$field_name(),
                         ))*
                         .finish()
@@ -344,36 +352,29 @@ macro_rules! codec_struct {
 
             // Serialization
             #[allow(non_camel_case_types, unused_parens)]
-            impl<$($field_name,)*> $crate::util::byte_codec::codec_struct_internals::SerializeInto<$codec, $struct_name, ()> for Builder<$($field_name,)*>
+            impl<$($field_name,)*> $crate::util::codec::codec_struct_internals::SerializeInto<$codec, $struct_name, ()> for Builder<$($field_name,)*>
             where
-                $($field_name: $crate::util::byte_codec::codec_struct_internals::SerializeInto<$codec, $field_ty, ($($config_ty)?)>,)*
+                $($field_name: $crate::util::codec::codec_struct_internals::SerializeInto<$codec, $field_ty, ($($config_ty)?)>,)*
             {
                 fn serialize(
 					&self,
-					stream: &mut impl $crate::util::byte_codec::codec_struct_internals::Write,
+					stream: &mut impl for<'a>
+						$crate::util::codec::codec_struct_internals::WriteStream<
+							<$codec as $crate::util::codec::codec_struct_internals::Codec>::WriteElement<'a>>,
 					_args: &mut (),
-				) -> $crate::util::byte_codec::codec_struct_internals::anyhow::Result<()> {
+				) -> $crate::util::codec::codec_struct_internals::anyhow::Result<()> {
 					let _ = &stream;
 
 					$(
-						$crate::util::byte_codec::codec_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::serialize(
+						$crate::util::codec::codec_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::serialize(
 							&self.$field_name,
 							stream,
 							&mut {$($config)?},
 						)?;
 					)*
 
-					$crate::util::byte_codec::codec_struct_internals::Ok(())
+					$crate::util::codec::codec_struct_internals::Ok(())
 				}
-
-                fn length(&self, _args: &mut ()) -> $crate::util::byte_codec::codec_struct_internals::anyhow::Result<$crate::util::byte_codec::codec_struct_internals::usize> {
-                    $crate::util::byte_codec::codec_struct_internals::Ok(
-						0 $(+ $crate::util::byte_codec::codec_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::length(
-							&self.$field_name,
-							&mut {$($config)?},
-						)?)*
-					)
-                }
             }
 
 			// TODO: Ensure that reified form can also serialize.

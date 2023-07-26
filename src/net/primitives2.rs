@@ -1,25 +1,31 @@
-use std::{
-    fmt,
-    io::{self, Write},
-    marker::PhantomData,
-    mem, str,
-};
+use std::{fmt, io::Write, mem, str};
 
 use anyhow::Context;
 use bytes::Bytes;
 
 use crate::util::{
-    byte_codec::{Codec, Deserialize, DeserializeFor, DeserializeForSimple, SerializeInto},
-    byte_cursor::ByteReadCursor,
+    byte_stream::{ByteCursor, ByteWriteStream, WriteCodepointCounter},
+    codec::{
+        Codec, Deserialize, DeserializeFor, DeserializeForSimple, EndPosSummary, SerializeInto,
+        WriteStream,
+    },
     var_int::{decode_var_i32_streaming, encode_var_u32},
-    write::WriteCodepointCounter,
 };
 
 pub struct MineCodec {
     _never: (),
 }
 
-impl Codec for MineCodec {}
+impl Codec for MineCodec {
+    type Reader<'a> = ByteCursor<'a>;
+    type ReaderPos = usize;
+
+    type WriteElement<'a> = [u8];
+
+    fn covariant_cast<'a: 'b, 'b>(reader: Self::Reader<'a>) -> Self::Reader<'b> {
+        reader
+    }
+}
 
 // === Numerics === //
 
@@ -32,7 +38,10 @@ macro_rules! impl_numerics {
 		}
 
 		impl DeserializeForSimple<MineCodec, ()> for $ty {
-			fn decode_simple<'a>(cursor: &mut ByteReadCursor<'a>, _args: &mut ()) -> anyhow::Result<Self> {
+			fn decode_simple<'a>(
+				cursor: &mut <MineCodec as Codec>::Reader<'a>,
+				_args: &mut (),
+			) -> anyhow::Result<Self::View<'a>> {
 				let arr = cursor.read_arr()
 					.ok_or_else(|| anyhow::anyhow!(
 						"Unexpected end-of-stream while reading {}: expected {} byte(s), got {} \
@@ -48,8 +57,8 @@ macro_rules! impl_numerics {
 		}
 
 		impl SerializeInto<MineCodec, $ty, ()> for $ty {
-			fn serialize(&self, stream: &mut impl io::Write, _args: &mut ()) -> anyhow::Result<()> {
-				stream.write_all(&self.to_be_bytes())?;
+			fn serialize(&self, stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>, _args: &mut ()) -> anyhow::Result<()> {
+				stream.push(&self.to_be_bytes())?;
 				Ok(())
 			}
 		}
@@ -64,9 +73,11 @@ impl Deserialize<MineCodec> for bool {
 }
 
 impl DeserializeForSimple<MineCodec, ()> for bool {
-    fn decode_simple<'a>(cursor: &mut ByteReadCursor<'a>, _args: &mut ()) -> anyhow::Result<Self> {
+    fn decode_simple<'a>(
+        cursor: &mut <MineCodec as Codec>::Reader<'a>,
+        _args: &mut (),
+    ) -> anyhow::Result<Self::View<'a>> {
         let byte = u8::decode_simple(cursor, &mut ())?;
-
         match byte {
             0 => Ok(false),
             1 => Ok(true),
@@ -79,8 +90,12 @@ impl DeserializeForSimple<MineCodec, ()> for bool {
 }
 
 impl SerializeInto<MineCodec, bool, ()> for bool {
-    fn serialize(&self, stream: &mut impl io::Write, args: &mut ()) -> anyhow::Result<()> {
-        (*self as u8).serialize_annotated(PhantomData::<u8>, stream, args)
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        _args: &mut (),
+    ) -> anyhow::Result<()> {
+        SerializeInto::<MineCodec, u8, ()>::serialize(&(*self as u8), stream, &mut ())
     }
 }
 
@@ -95,13 +110,13 @@ impl From<i32> for VarInt {
 }
 
 impl Deserialize<MineCodec> for VarInt {
-    type Summary = usize;
+    type Summary = EndPosSummary<usize>;
     type View<'a> = i32;
 }
 
 impl DeserializeForSimple<MineCodec, ()> for VarInt {
     fn decode_simple<'a>(
-        cursor: &mut ByteReadCursor<'a>,
+        cursor: &mut <MineCodec as Codec>::Reader<'a>,
         _args: &mut (),
     ) -> anyhow::Result<Self::View<'a>> {
         decode_var_i32_streaming(cursor)?.ok_or_else(|| {
@@ -111,13 +126,22 @@ impl DeserializeForSimple<MineCodec, ()> for VarInt {
 }
 
 impl SerializeInto<MineCodec, VarInt, ()> for VarInt {
-    fn serialize(&self, stream: &mut impl io::Write, _args: &mut ()) -> anyhow::Result<()> {
-        encode_var_u32(stream, self.0)
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        _args: &mut (),
+    ) -> anyhow::Result<()> {
+        encode_var_u32(&mut stream.as_write(), self.0)?;
+        Ok(())
     }
 }
 
 impl SerializeInto<MineCodec, VarInt, ()> for i32 {
-    fn serialize(&self, stream: &mut impl io::Write, args: &mut ()) -> anyhow::Result<()> {
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        args: &mut (),
+    ) -> anyhow::Result<()> {
         VarInt(*self).serialize(stream, args)
     }
 }
@@ -133,13 +157,13 @@ impl From<u32> for VarUint {
 }
 
 impl Deserialize<MineCodec> for VarUint {
-    type Summary = usize;
+    type Summary = EndPosSummary<usize>;
     type View<'a> = u32;
 }
 
 impl DeserializeForSimple<MineCodec, ()> for VarUint {
     fn decode_simple<'a>(
-        cursor: &mut ByteReadCursor<'a>,
+        cursor: &mut <MineCodec as Codec>::Reader<'a>,
         _args: &mut (),
     ) -> anyhow::Result<Self::View<'a>> {
         let value = VarInt::decode_simple(cursor, &mut ())?;
@@ -153,14 +177,22 @@ impl DeserializeForSimple<MineCodec, ()> for VarUint {
 }
 
 impl SerializeInto<MineCodec, VarUint, ()> for VarUint {
-    fn serialize(&self, stream: &mut impl io::Write, args: &mut ()) -> anyhow::Result<()> {
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        args: &mut (),
+    ) -> anyhow::Result<()> {
         let value = i32::try_from(self.0).context("Attempted to send oversized VarUint")?;
         VarInt(value).serialize(stream, args)
     }
 }
 
 impl SerializeInto<MineCodec, VarUint, ()> for u32 {
-    fn serialize(&self, stream: &mut impl io::Write, args: &mut ()) -> anyhow::Result<()> {
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        args: &mut (),
+    ) -> anyhow::Result<()> {
         VarUint(*self).serialize(stream, args)
     }
 }
@@ -184,7 +216,7 @@ impl Deserialize<MineCodec> for TrailingByteArray {
 
 impl DeserializeForSimple<MineCodec, ()> for TrailingByteArray {
     fn decode_simple<'a>(
-        cursor: &mut ByteReadCursor<'a>,
+        cursor: &mut <MineCodec as Codec>::Reader<'a>,
         _args: &mut (),
     ) -> anyhow::Result<Self::View<'a>> {
         let remaining = cursor.remaining();
@@ -194,15 +226,23 @@ impl DeserializeForSimple<MineCodec, ()> for TrailingByteArray {
 }
 
 impl SerializeInto<MineCodec, TrailingByteArray, ()> for TrailingByteArray {
-    fn serialize(&self, stream: &mut impl io::Write, _args: &mut ()) -> anyhow::Result<()> {
-        stream.write_all(&self.0)?;
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        _args: &mut (),
+    ) -> anyhow::Result<()> {
+        stream.push(&self.0)?;
         Ok(())
     }
 }
 
 impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
-    fn serialize(&self, stream: &mut impl io::Write, _args: &mut ()) -> anyhow::Result<()> {
-        stream.write_all(self)?;
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        _args: &mut (),
+    ) -> anyhow::Result<()> {
+        stream.push(self)?;
         Ok(())
     }
 }
@@ -215,7 +255,7 @@ impl Deserialize<MineCodec> for String {
 
 impl DeserializeFor<MineCodec, Option<u32>> for String {
     fn summarize(
-        cursor: &mut ByteReadCursor,
+        cursor: &mut ByteCursor,
         max_len: &mut Option<u32>,
     ) -> anyhow::Result<Self::Summary> {
         let start_pos = cursor.pos();
@@ -278,7 +318,7 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
 
     unsafe fn view<'a>(
         summary: &'a Self::Summary,
-        cursor: ByteReadCursor<'a>,
+        cursor: ByteCursor<'a>,
         _args: &mut Option<u32>,
     ) -> Self::View<'a> {
         let mut cursor = cursor.with_pos(*summary);
@@ -291,7 +331,7 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
         str::from_utf8_unchecked(data)
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, _args: &mut Option<u32>) {
+    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, _args: &mut Option<u32>) {
         debug_assert_eq!(cursor.pos(), *summary);
         let byte_len = VarInt::decode_simple(cursor, &mut ()).unwrap();
         let _ = cursor.read_slice(byte_len as usize);
@@ -299,7 +339,11 @@ impl DeserializeFor<MineCodec, Option<u32>> for String {
 }
 
 impl<T: fmt::Display> SerializeInto<MineCodec, String, Option<u32>> for T {
-    fn serialize(&self, stream: &mut impl io::Write, args: &mut Option<u32>) -> anyhow::Result<()> {
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        args: &mut Option<u32>,
+    ) -> anyhow::Result<()> {
         // Determine the size of the string.
         let mut counter = WriteCodepointCounter::default();
         write!(&mut counter, "{self}")?;
@@ -319,33 +363,37 @@ impl<T: fmt::Display> SerializeInto<MineCodec, String, Option<u32>> for T {
             .map_err(|_| anyhow::anyhow!("String max length overflew an i32."))?;
 
         VarInt(len).serialize(stream, &mut ())?;
-        write!(stream, "{self}")?;
+        write!(stream.as_write(), "{self}")?;
 
         Ok(())
     }
 }
 
 impl DeserializeFor<MineCodec, u32> for String {
-    fn summarize(cursor: &mut ByteReadCursor, args: &mut u32) -> anyhow::Result<Self::Summary> {
+    fn summarize(cursor: &mut ByteCursor, args: &mut u32) -> anyhow::Result<Self::Summary> {
         Self::summarize(cursor, &mut Some(*args))
     }
 
     unsafe fn view<'a>(
         summary: &'a Self::Summary,
-        cursor: ByteReadCursor<'a>,
+        cursor: ByteCursor<'a>,
         args: &mut u32,
     ) -> Self::View<'a> {
         Self::view(summary, cursor, &mut Some(*args))
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, args: &mut u32) {
+    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, args: &mut u32) {
         Self::skip(summary, cursor, &mut Some(*args))
     }
 }
 
 impl<T: fmt::Display> SerializeInto<MineCodec, String, u32> for T {
-    fn serialize(&self, stream: &mut impl Write, args: &mut u32) -> anyhow::Result<()> {
-        self.serialize(stream, &mut Some(*args))
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        args: &mut u32,
+    ) -> anyhow::Result<()> {
+        SerializeInto::<MineCodec, String, Option<u32>>::serialize(self, stream, &mut Some(*args))
     }
 }
 
@@ -375,27 +423,31 @@ impl Deserialize<MineCodec> for Identifier {
 }
 
 impl DeserializeFor<MineCodec, ()> for Identifier {
-    fn summarize(cursor: &mut ByteReadCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
+    fn summarize(cursor: &mut ByteCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
         String::summarize(cursor, &mut Some(Self::MAX_LEN))
     }
 
     unsafe fn view<'a>(
         summary: &'a Self::Summary,
-        cursor: ByteReadCursor<'a>,
+        cursor: ByteCursor<'a>,
         _args: &mut (),
     ) -> Self::View<'a> {
         String::view(summary, cursor, &mut Some(Self::MAX_LEN))
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteReadCursor, _args: &mut ()) {
+    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, _args: &mut ()) {
         String::skip(summary, cursor, &mut Some(Self::MAX_LEN))
     }
 }
 
 impl<T: fmt::Display> SerializeInto<MineCodec, Identifier, ()> for T {
-    fn serialize(&self, stream: &mut impl Write, _args: &mut ()) -> anyhow::Result<()> {
-        self.serialize_annotated(
-            PhantomData::<String>,
+    fn serialize(
+        &self,
+        stream: &mut impl for<'a> WriteStream<<MineCodec as Codec>::WriteElement<'a>>,
+        _args: &mut (),
+    ) -> anyhow::Result<()> {
+        SerializeInto::<MineCodec, String, Option<u32>>::serialize(
+            self,
             stream,
             &mut Some(Identifier::MAX_LEN),
         )

@@ -2,10 +2,10 @@ use std::io;
 
 use super::{
     bits::{i32_from_u32_2c, i32_to_u32_2c, StaticBitSet},
-    byte_cursor::ByteReadCursor,
+    byte_stream::ByteCursor,
 };
 
-pub fn decode_var_i32_streaming(cursor: &mut ByteReadCursor) -> anyhow::Result<Option<i32>> {
+pub fn decode_var_i32_streaming(cursor: &mut ByteCursor) -> anyhow::Result<Option<i32>> {
     let mut accum = 0u32;
     let mut shift = 0;
 
@@ -31,7 +31,7 @@ pub fn decode_var_i32_streaming(cursor: &mut ByteReadCursor) -> anyhow::Result<O
     Ok(Some(accum))
 }
 
-pub fn encode_var_u32(stream: &mut impl io::Write, value: i32) -> anyhow::Result<()> {
+pub fn encode_var_u32(stream: &mut impl io::Write, value: i32) -> io::Result<()> {
     let mut accum = i32_to_u32_2c(value);
 
     loop {
