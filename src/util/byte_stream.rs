@@ -3,8 +3,9 @@ use std::{cell::Cell, fmt, io, str};
 use bytes::{Buf, Bytes, BytesMut};
 
 use super::{
-    codec::{ReadStream, WriteStream},
+    codec::{ReadCursor, WriteStream},
     format::lazy_format,
+    slice::detect_sub_slice,
 };
 
 // === Write as Stream === //
@@ -178,7 +179,7 @@ impl<'a> ByteCursor<'a> {
     }
 }
 
-impl ReadStream for ByteCursor<'_> {
+impl ReadCursor for ByteCursor<'_> {
     type Pos = usize;
 
     fn pos(&self) -> Self::Pos {
@@ -204,40 +205,13 @@ impl Snip for Bytes {
 
 impl Snip for BytesMut {
     fn freeze_range(&self, subset: &[u8]) -> Bytes {
-        // Adapted from `Bytes::slice_ref`.
-
-        // Empty slice and empty Bytes may have their pointers reset
-        // so explicitly allow empty slice to be a sub-slice of any slice.
         if subset.is_empty() {
-            return Bytes::new();
+            Bytes::new()
+        } else {
+            self.clone()
+                .freeze()
+                .slice(detect_sub_slice(&*self, subset).unwrap())
         }
-
-        let bytes_p = self.as_ptr() as usize;
-        let bytes_len = self.len();
-
-        let sub_p = subset.as_ptr() as usize;
-        let sub_len = subset.len();
-
-        assert!(
-            sub_p >= bytes_p,
-            "subset pointer ({:p}) is smaller than self pointer ({:p})",
-            subset.as_ptr(),
-            self.as_ptr(),
-        );
-        assert!(
-            sub_p + sub_len <= bytes_p + bytes_len,
-            "subset is out of bounds: self = ({:p}, {}), subset = ({:p}, {})",
-            self.as_ptr(),
-            bytes_len,
-            subset.as_ptr(),
-            sub_len,
-        );
-
-        let sub_offset = sub_p - bytes_p;
-
-        self.clone()
-            .freeze()
-            .slice(sub_offset..(sub_offset + sub_len))
     }
 }
 

@@ -3,7 +3,7 @@ use std::{error::Error, fmt};
 // === Common === //
 
 pub trait Codec: Sized + 'static {
-    type Reader<'a>: ReadStream<Pos = Self::ReaderPos>;
+    type Reader<'a>: ReadCursor<Pos = Self::ReaderPos>;
     type ReaderPos: ReadPos;
 
     type WriteElement<'a>: ?Sized;
@@ -11,7 +11,7 @@ pub trait Codec: Sized + 'static {
     fn covariant_cast<'a: 'b, 'b>(reader: Self::Reader<'a>) -> Self::Reader<'b>;
 }
 
-pub trait ReadStream: Sized + Clone {
+pub trait ReadCursor: Sized + Clone {
     type Pos: ReadPos;
 
     fn pos(&self) -> Self::Pos;
@@ -98,7 +98,7 @@ pub trait DeserializeFor<C: Codec, A>: Deserialize<C> {
 
 // === DeserializeForSimples === //
 
-pub trait DeserializeForSimple<C: Codec, A>: 'static + Deserialize<C> {
+pub trait DeserializeForSimple<C: Codec, A>: Deserialize<C> {
     fn decode_simple<'a>(
         cursor: &mut C::Reader<'a>,
         args: &mut A,
@@ -176,11 +176,11 @@ pub trait SerializeInto<C: Codec, T, A>: Sized {
     ) -> anyhow::Result<()>;
 }
 
-// === Struct === //
+// === Sequential Struct === //
 
 pub mod codec_struct_internals {
     pub use {
-        super::{Codec, Deserialize, DeserializeFor, ReadStream, SerializeInto, WriteStream},
+        super::{Codec, Deserialize, DeserializeFor, ReadCursor, SerializeInto, WriteStream},
         anyhow,
         std::{
             clone::Clone,
@@ -192,7 +192,7 @@ pub mod codec_struct_internals {
     };
 }
 
-macro_rules! codec_struct {
+macro_rules! seq_codec_struct {
     ($(
         $(#[$attr:meta])*
         $struct_vis:vis struct $mod_name:ident::$struct_name:ident($codec:ty) {
@@ -385,4 +385,4 @@ macro_rules! codec_struct {
     )*};
 }
 
-pub(crate) use codec_struct;
+pub(crate) use seq_codec_struct;
