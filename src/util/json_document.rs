@@ -1,32 +1,16 @@
-use std::{
-    hash::{BuildHasher, Hasher},
-    marker::PhantomData,
-};
-
-use derive_where::derive_where;
 use hashbrown::HashMap;
-use justjson::{
-    parser::{JsonKind, ParseDelegate, Parser},
-    JsonString,
-};
+use justjson::parser::{JsonKind, ParseDelegate, Parser};
 
-use crate::util::slice::detect_sub_slice;
+use super::interner::{Intern, Interner};
 
-// === JsonDocumentSummary === //
+// === JsonDocument === //
 
-// Summary
-#[derive_where(Debug)]
-pub struct JsonDocumentSummary<S> {
-    _ty: PhantomData<fn() -> S>,
+// Container
+#[derive(Debug, Clone)]
+pub struct JsonDocument {
+    interner: Interner,
     map: HashMap<JsonKey, JsonValue>,
-    keys: HashMap<InternKey, u32>,
     root: JsonValue,
-}
-
-#[derive(Debug)]
-struct InternKey {
-    hash: u64,
-    str: JsonStringSlice,
 }
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
@@ -35,76 +19,64 @@ struct JsonKey {
     key: u32,
 }
 
-impl<S: StaticInterner> JsonDocumentSummary<S> {
-    pub fn parse(text: &str) -> anyhow::Result<Self> {
+impl JsonDocument {
+    pub fn parse(text: &[u8]) -> anyhow::Result<Self> {
         // N.B. this check is necessary to allow us to use u32s everywhere.
         assert!(text.len() <= u32::MAX as usize);
 
-        let mut delegate = JsonDocumentParser::<S> {
-            _ty: PhantomData,
-            backing: text,
+        let mut delegate = JsonDocumentParser {
+            interner: Interner::default(),
             map: HashMap::default(),
-            keys: HashMap::default(),
-            gen: S::COUNT,
+            gen: 0,
         };
 
-        let root = Parser::parse_json(text, &mut delegate)?;
+        let root = Parser::parse_json_bytes(text, &mut delegate)?;
 
         Ok(Self {
-            _ty: PhantomData,
+            interner: delegate.interner,
             map: delegate.map,
-            keys: delegate.keys,
             root,
         })
     }
 
-    pub fn root(&self) -> &JsonValue {
-        &self.root
+    pub fn root(&self) -> JsonValue {
+        self.root
     }
 
-    pub fn root_view<'a>(&'a self, backing: &'a str) -> JsonValueView<'a, S> {
-        self.view(backing).root()
+    pub fn root_view(&self) -> JsonValueView<'_> {
+        JsonValueView::wrap(self, self.root)
     }
 
-    pub fn view<'a>(&'a self, backing: &'a str) -> JsonDocumentView<'a, S> {
-        JsonDocumentView {
-            summary: self,
-            backing,
-        }
+    pub fn object_field(&self, obj: JsonObject, key: &str) -> Option<JsonValue> {
+        let key = self.interner.find_intern(key)?;
+        self.map
+            .get(&JsonKey {
+                parent: obj.0,
+                key: key.id(),
+            })
+            .copied()
     }
 
-    pub fn object_field(&self, backing: &str, obj: JsonObject, key: &str) -> Option<&JsonValue> {
-        let key = JsonString::from_json(key).unwrap();
-        let key = if let Some(intern) = S::try_intern(&key) {
-            intern
-        } else {
-            let hash = hash_char_stream(self.keys.hasher(), key.len(), key.decoded());
-            let Some((_, intern)) = self.keys.raw_entry().from_hash(hash, |entry| {
-                entry.hash == hash && entry.str.decode(backing) == key
-            }) else {
-				return None;
-			};
-
-            *intern
-        };
-
-        self.map.get(&JsonKey { parent: obj.0, key })
+    pub fn array_element(&self, obj: JsonArray, index: u32) -> Option<JsonValue> {
+        self.map
+            .get(&JsonKey {
+                parent: obj.id,
+                key: index,
+            })
+            .copied()
     }
 
-    pub fn array_element(&self, obj: JsonArray, index: u32) -> Option<&JsonValue> {
-        self.map.get(&JsonKey {
-            parent: obj.id,
-            key: index,
-        })
+    pub fn string_value(&self, intern: Intern) -> &str {
+        self.interner.decode(intern)
     }
 }
 
 // Data model
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum JsonValue {
     Object(JsonObject),
     Array(JsonArray),
-    String(JsonStringSlice),
+    String(Intern),
     Number(JsonNumber),
     Boolean(bool),
     Null,
@@ -132,174 +104,73 @@ pub enum JsonNumber {
     I64(i64),
 }
 
-// TODO: Make string handling more reasonable
-#[derive(Debug, Clone)]
-pub enum JsonStringSlice {
-    Owned(Box<str>),
-    Borrowed { start: u32, end: u32 },
-}
+// === JsonDocument Views === //
 
-impl JsonStringSlice {
-    pub fn encode(backing: &str, str: &JsonString<'_>) -> Self {
-        let target = 'a: {
-            if let Some(justjson::AnyStr::Borrowed(borrowed)) = str.as_json_str() {
-                break 'a Some(*borrowed);
-            }
-
-            if let Some(borrowed) = str.as_str() {
-                break 'a Some(borrowed);
-            }
-
-            None
-        };
-
-        if let Some(range) =
-            target.and_then(|target| detect_sub_slice(backing.as_bytes(), target.as_bytes()))
-        {
-            Self::Borrowed {
-                start: range.start as u32,
-                end: range.end as u32,
-            }
-        } else {
-            Self::Owned(match str.decode_if_needed() {
-                justjson::AnyStr::Owned(str) => Box::from(str),
-                justjson::AnyStr::Borrowed(str) => Box::from(str),
-            })
-        }
-    }
-
-    pub fn decode<'a>(&'a self, backing: &'a str) -> JsonString<'a> {
-        let backing = match self {
-            JsonStringSlice::Owned(owned) => owned,
-            JsonStringSlice::Borrowed { start, end } => {
-                &backing[(*start as usize)..(*end as usize)]
-            }
-        };
-
-        JsonString::from_json(&backing).unwrap()
-    }
-}
-
-fn hash_char_stream(
-    hasher: &impl BuildHasher,
-    len: usize,
-    chars: impl IntoIterator<Item = char>,
-) -> u64 {
-    let mut hasher = hasher.build_hasher();
-    hasher.write_usize(len);
-    for char in chars {
-        hasher.write_u32(char as u32);
-    }
-    hasher.finish()
-}
-
-// === JsonDocumentView === //
-
-// JsonDocumentView
-#[derive_where(Debug, Copy, Clone)]
-pub struct JsonDocumentView<'a, S: StaticInterner> {
-    pub summary: &'a JsonDocumentSummary<S>,
-    pub backing: &'a str,
-}
-
-impl<'a, S: StaticInterner> JsonDocumentView<'a, S> {
-    pub fn root(self) -> JsonValueView<'a, S> {
-        JsonValueView::wrap(self, self.summary.root())
-    }
-
-    pub fn object_field(self, obj: JsonObject, key: &str) -> Option<&'a JsonValue> {
-        self.summary.object_field(self.backing, obj, key)
-    }
-
-    pub fn array_element(self, obj: JsonArray, index: u32) -> Option<&'a JsonValue> {
-        self.summary.array_element(obj, index)
-    }
-
-    pub fn string_value<'b>(self, str: &'b JsonStringSlice) -> JsonString<'b>
-    where
-        'a: 'b,
-    {
-        str.decode(self.backing)
-    }
-}
-
-// JsonValueView
-#[derive_where(Debug, Copy, Clone)]
-pub enum JsonValueView<'a, S: StaticInterner> {
-    Object(JsonObjectView<'a, S>),
-    Array(JsonArrayView<'a, S>),
-    String(JsonStringSliceView<'a, S>),
+#[derive(Debug, Copy, Clone)]
+pub enum JsonValueView<'a> {
+    Object(JsonObjectView<'a>),
+    Array(JsonArrayView<'a>),
+    String(&'a str),
     Number(JsonNumber),
     Boolean(bool),
     Null,
 }
 
-impl<'a, S: StaticInterner> JsonValueView<'a, S> {
-    pub fn wrap(document: JsonDocumentView<'a, S>, value: &'a JsonValue) -> Self {
+impl<'a> JsonValueView<'a> {
+    pub fn wrap(doc: &'a JsonDocument, value: JsonValue) -> Self {
         match value {
-            JsonValue::Object(handle) => Self::Object(JsonObjectView {
-                document,
-                handle: *handle,
-            }),
-            JsonValue::Array(handle) => Self::Array(JsonArrayView {
-                document,
-                handle: *handle,
-            }),
-            JsonValue::String(handle) => Self::String(JsonStringSliceView { document, handle }),
-            JsonValue::Number(number) => Self::Number(*number),
-            JsonValue::Boolean(value) => Self::Boolean(*value),
+            JsonValue::Object(handle) => Self::Object(JsonObjectView { doc, handle }),
+            JsonValue::Array(handle) => Self::Array(JsonArrayView { doc, handle }),
+            JsonValue::String(text) => Self::String(doc.string_value(text)),
+            JsonValue::Number(number) => Self::Number(number),
+            JsonValue::Boolean(bool) => Self::Boolean(bool),
             JsonValue::Null => Self::Null,
         }
     }
 }
 
-// JsonObjectView
-#[derive_where(Debug, Copy, Clone)]
-pub struct JsonObjectView<'a, S: StaticInterner> {
-    pub document: JsonDocumentView<'a, S>,
+#[derive(Debug, Copy, Clone)]
+pub struct JsonObjectView<'a> {
+    pub doc: &'a JsonDocument,
     pub handle: JsonObject,
 }
 
-impl<'a, S: StaticInterner> JsonObjectView<'a, S> {
-    pub fn get(&self, key: &str) -> Option<JsonValueView<'a, S>> {
-        self.document
+impl<'a> JsonObjectView<'a> {
+    pub fn get(self, key: &str) -> Option<JsonValueView<'a>> {
+        self.doc
             .object_field(self.handle, key)
-            .map(|value| JsonValueView::wrap(self.document, value))
+            .map(|handle| JsonValueView::wrap(self.doc, handle))
     }
 }
 
-// JsonArrayView
-#[derive_where(Debug, Copy, Clone)]
-pub struct JsonArrayView<'a, S: StaticInterner> {
-    pub document: JsonDocumentView<'a, S>,
+#[derive(Debug, Copy, Clone)]
+pub struct JsonArrayView<'a> {
+    pub doc: &'a JsonDocument,
     pub handle: JsonArray,
 }
 
-impl<'a, S: StaticInterner> JsonArrayView<'a, S> {
-    pub fn get(&self, index: u32) -> Option<JsonValueView<'a, S>> {
-        self.document
-            .array_element(self.handle, index)
-            .map(|value| JsonValueView::wrap(self.document, value))
+impl<'a> JsonArrayView<'a> {
+    pub fn get(self, idx: u32) -> Option<JsonValueView<'a>> {
+        self.doc
+            .array_element(self.handle, idx)
+            .map(|handle| JsonValueView::wrap(self.doc, handle))
+    }
+
+    pub fn len(self) -> u32 {
+        self.handle.len()
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = JsonValueView<'a>> + 'a {
+        (0..self.len()).map_while(move |i| self.get(i))
     }
 }
-
-// JsonStringSliceView
-#[derive_where(Debug, Copy, Clone)]
-pub struct JsonStringSliceView<'a, S: StaticInterner> {
-    pub document: JsonDocumentView<'a, S>,
-    pub handle: &'a JsonStringSlice,
-}
-
-// TODO: Finish implementing
 
 // === JsonDocumentParser === //
 
 #[derive(Debug)]
-struct JsonDocumentParser<'a, S> {
-    _ty: PhantomData<fn() -> S>,
-    backing: &'a str,
+struct JsonDocumentParser {
+    interner: Interner,
     map: HashMap<JsonKey, JsonValue>,
-    keys: HashMap<InternKey, u32>,
     gen: u32,
 }
 
@@ -309,11 +180,11 @@ struct ObjectOrArrayBuilder {
     len: u32,
 }
 
-impl<'a, S: StaticInterner> ParseDelegate<'a> for &'_ mut JsonDocumentParser<'a, S> {
+impl ParseDelegate<'_> for &'_ mut JsonDocumentParser {
     type Value = JsonValue;
     type Object = ObjectOrArrayBuilder;
     type Array = ObjectOrArrayBuilder;
-    type Key = u32;
+    type Key = Intern;
     type Error = anyhow::Error;
 
     fn null(&mut self) -> Result<Self::Value, Self::Error> {
@@ -324,7 +195,7 @@ impl<'a, S: StaticInterner> ParseDelegate<'a> for &'_ mut JsonDocumentParser<'a,
         Ok(JsonValue::Boolean(value))
     }
 
-    fn number(&mut self, value: justjson::JsonNumber<'a>) -> Result<Self::Value, Self::Error> {
+    fn number(&mut self, value: justjson::JsonNumber<'_>) -> Result<Self::Value, Self::Error> {
         if let Some(value) = value.as_u64() {
             return Ok(JsonValue::Number(JsonNumber::U64(value)));
         }
@@ -340,11 +211,10 @@ impl<'a, S: StaticInterner> ParseDelegate<'a> for &'_ mut JsonDocumentParser<'a,
         anyhow::bail!("Failed to parse JSON number {:?}", value.source());
     }
 
-    fn string(&mut self, value: justjson::JsonString<'a>) -> Result<Self::Value, Self::Error> {
-        Ok(JsonValue::String(JsonStringSlice::encode(
-            self.backing,
-            &value,
-        )))
+    fn string(&mut self, value: justjson::JsonString<'_>) -> Result<Self::Value, Self::Error> {
+        Ok(JsonValue::String(
+            self.interner.intern_iter(value.decoded()),
+        ))
     }
 
     fn begin_object(&mut self) -> Result<Self::Object, Self::Error> {
@@ -359,34 +229,9 @@ impl<'a, S: StaticInterner> ParseDelegate<'a> for &'_ mut JsonDocumentParser<'a,
     fn object_key(
         &mut self,
         _object: &mut Self::Object,
-        key: justjson::JsonString<'a>,
+        key: justjson::JsonString<'_>,
     ) -> Result<Self::Key, Self::Error> {
-        if let Some(intern) = S::try_intern(&key) {
-            Ok(intern)
-        } else {
-            let hash = hash_char_stream(self.keys.hasher(), key.decoded_len(), key.decoded());
-            let entry = self.keys.raw_entry_mut().from_hash(hash, |entry| {
-                entry.hash == hash && entry.str.decode(self.backing) == key
-            });
-
-            match entry {
-                hashbrown::hash_map::RawEntryMut::Occupied(entry) => Ok(*entry.get()),
-                hashbrown::hash_map::RawEntryMut::Vacant(entry) => {
-                    self.gen += 1;
-                    entry.insert_with_hasher(
-                        hash,
-                        InternKey {
-                            hash: hash,
-                            str: JsonStringSlice::encode(self.backing, &key),
-                        },
-                        self.gen,
-                        |entry| entry.hash,
-                    );
-
-                    Ok(self.gen)
-                }
-            }
-        }
+        Ok(self.interner.intern_iter(key.decoded()))
     }
 
     fn object_value(
@@ -398,7 +243,7 @@ impl<'a, S: StaticInterner> ParseDelegate<'a> for &'_ mut JsonDocumentParser<'a,
         self.map.insert(
             JsonKey {
                 parent: object.id,
-                key,
+                key: key.id(),
             },
             value,
         );
@@ -462,12 +307,4 @@ impl<'a, S: StaticInterner> ParseDelegate<'a> for &'_ mut JsonDocumentParser<'a,
             JsonValue::Null => JsonKind::Null,
         }
     }
-}
-
-// === StaticInterner === //
-
-pub trait StaticInterner {
-    const COUNT: u32;
-
-    fn try_intern(text: &JsonString) -> Option<u32>;
 }
