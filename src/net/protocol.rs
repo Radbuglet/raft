@@ -3,7 +3,7 @@ use super::primitives::{
 };
 use super::transport::{FramedPacket, UnframedPacket};
 
-use crate::util::byte_stream::{ByteCursor, Snip};
+use crate::util::{bytes_integration::Snip, proto::byte_stream::ByteCursor};
 
 use bytes::{BufMut, Bytes};
 use std::any::type_name;

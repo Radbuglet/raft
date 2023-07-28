@@ -2,7 +2,7 @@ use std::io;
 
 use super::{
     bits::{i32_from_u32_2c, i32_to_u32_2c, StaticBitSet},
-    byte_stream::ByteCursor,
+    proto::byte_stream::ByteCursor,
 };
 
 pub fn decode_var_i32_streaming(cursor: &mut ByteCursor) -> anyhow::Result<Option<i32>> {

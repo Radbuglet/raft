@@ -1,7 +1,7 @@
 use hashbrown::HashMap;
 use justjson::parser::{JsonKind, ParseDelegate, Parser};
 
-use super::interner::{Intern, Interner};
+use crate::util::interner::{Intern, Interner};
 
 // === JsonDocument === //
 

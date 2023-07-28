@@ -6,7 +6,8 @@ use smallvec::SmallVec;
 
 use crate::util::{
     bits::{i32_from_u32_2c, i32_to_u32_2c, StaticBitSet},
-    byte_stream::{ByteCursor, Snip, WriteByteCounter},
+    bytes_integration::Snip,
+    proto::byte_stream::{ByteCursor, WriteByteCounter},
 };
 
 const TOO_BIG_ERR: &str = "byte array is too big to send over the network";
@@ -69,7 +70,7 @@ impl<T: StreamingCodec> Codec<()> for T {
 pub mod codec_struct_internals {
     pub use {
         super::{Codec, SizedCodec},
-        crate::util::byte_stream::{ByteCursor, Snip},
+        crate::util::{bytes_integration::Snip, proto::byte_stream::ByteCursor},
         anyhow::Result,
         bytes::BufMut,
         log::trace,

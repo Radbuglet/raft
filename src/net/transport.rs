@@ -6,7 +6,7 @@ use tokio_util::codec::{Decoder, Encoder, Framed};
 
 use crate::{
     net::primitives::VarUint,
-    util::byte_stream::{ByteMutReadSession, Snip},
+    util::bytes_integration::{ByteMutReadSession, Snip},
 };
 
 use super::primitives::{Codec, SizedCodec, StreamingCodec};
