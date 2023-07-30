@@ -1,7 +1,15 @@
+use std::{fmt, marker::PhantomData};
+
+use derive_where::derive_where;
 use hashbrown::HashMap;
 use justjson::parser::{JsonKind, ParseDelegate, Parser};
 
 use crate::util::interner::{Intern, Interner};
+
+use super::{
+    core::Codec,
+    decode_schema::{DeserializeSchema, SchemaDecodeCodec, SchemaDocument, SchemaView},
+};
 
 // === JsonDocument === //
 
@@ -82,6 +90,12 @@ pub enum JsonValue {
     Null,
 }
 
+impl JsonValue {
+    pub fn as_view(self, document: &JsonDocument) -> JsonValueView<'_> {
+        JsonValueView::wrap(document, self)
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct JsonObject(u32);
 
@@ -110,7 +124,7 @@ pub enum JsonNumber {
 pub enum JsonValueView<'a> {
     Object(JsonObjectView<'a>),
     Array(JsonArrayView<'a>),
-    String(&'a str),
+    String(Intern, &'a str),
     Number(JsonNumber),
     Boolean(bool),
     Null,
@@ -120,11 +134,25 @@ impl<'a> JsonValueView<'a> {
     pub fn wrap(doc: &'a JsonDocument, value: JsonValue) -> Self {
         match value {
             JsonValue::Object(handle) => Self::Object(JsonObjectView { doc, handle }),
-            JsonValue::Array(handle) => Self::Array(JsonArrayView { doc, handle }),
-            JsonValue::String(text) => Self::String(doc.string_value(text)),
+            JsonValue::Array(handle) => Self::Array(JsonArrayView {
+                document: doc,
+                handle,
+            }),
+            JsonValue::String(text) => Self::String(text, doc.string_value(text)),
             JsonValue::Number(number) => Self::Number(number),
             JsonValue::Boolean(bool) => Self::Boolean(bool),
             JsonValue::Null => Self::Null,
+        }
+    }
+
+    pub fn unwrap(self) -> JsonValue {
+        match self {
+            JsonValueView::Object(obj) => JsonValue::Object(obj.handle),
+            JsonValueView::Array(arr) => JsonValue::Array(arr.handle),
+            JsonValueView::String(intern, _str) => JsonValue::String(intern),
+            JsonValueView::Number(num) => JsonValue::Number(num),
+            JsonValueView::Boolean(b) => JsonValue::Boolean(b),
+            JsonValueView::Null => JsonValue::Null,
         }
     }
 }
@@ -145,15 +173,15 @@ impl<'a> JsonObjectView<'a> {
 
 #[derive(Debug, Copy, Clone)]
 pub struct JsonArrayView<'a> {
-    pub doc: &'a JsonDocument,
+    pub document: &'a JsonDocument,
     pub handle: JsonArray,
 }
 
 impl<'a> JsonArrayView<'a> {
     pub fn get(self, idx: u32) -> Option<JsonValueView<'a>> {
-        self.doc
+        self.document
             .array_element(self.handle, idx)
-            .map(|handle| JsonValueView::wrap(self.doc, handle))
+            .map(|handle| JsonValueView::wrap(self.document, handle))
     }
 
     pub fn len(self) -> u32 {
@@ -306,5 +334,260 @@ impl ParseDelegate<'_> for &'_ mut JsonDocumentParser {
             JsonValue::String(_) => JsonKind::String,
             JsonValue::Null => JsonKind::Null,
         }
+    }
+}
+
+// === Schema Integration === //
+
+// Codec
+pub struct JsonSchema;
+
+impl Codec for JsonSchema {}
+
+impl SchemaDecodeCodec for JsonSchema {
+    type Document = JsonDocument;
+    type DocumentRef = JsonValue;
+}
+
+impl SchemaDocument for JsonDocument {
+    type AnyRef = JsonValue;
+
+    fn root(&self) -> Self::AnyRef {
+        self.root()
+    }
+}
+
+// Option
+impl<T> DeserializeSchema<JsonSchema, ()> for Option<T>
+where
+    T: DeserializeSchema<JsonSchema, ()>,
+{
+    type Shortcut = Option<T::Shortcut>;
+    type View<'a> = Option<T::View<'a>>;
+
+    fn make_shortcut(
+        document: &JsonDocument,
+        object: Option<JsonValue>,
+    ) -> anyhow::Result<Self::Shortcut> {
+        match object {
+            None | Some(JsonValue::Null) => Ok(None),
+            value @ _ => Ok(Some(T::make_shortcut(document, object)?)),
+        }
+    }
+
+    fn view_shortcut<'a>(
+        document: &'a <JsonSchema as SchemaDecodeCodec>::Document,
+        shortcut: Self::Shortcut,
+        args: (),
+    ) -> Self::View<'a> {
+        shortcut.map(|shortcut| T::view_shortcut(document, shortcut, args))
+    }
+}
+
+impl<V: SchemaView<JsonSchema, ()>> SchemaView<JsonSchema, ()> for Option<V> {
+    type Reified = Option<V::Reified>;
+    type Shortcut = Option<V::Shortcut>;
+
+    fn validate_deep(&self) -> anyhow::Result<()> {
+        if let Some(inner) = self {
+            inner.validate_deep()?;
+        }
+        Ok(())
+    }
+
+    fn as_shortcut(&self) -> Self::Shortcut {
+        self.map(|v| v.as_shortcut())
+    }
+
+    fn reify(&self) -> anyhow::Result<Self::Reified> {
+        if let Some(inner) = self {
+            Ok(Some(inner.reify()?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+// Array
+impl<T> DeserializeSchema<JsonSchema, ()> for Vec<T>
+where
+    T: DeserializeSchema<JsonSchema, ()>,
+{
+    type Shortcut = JsonArray;
+    type View<'a> = ArrayView<'a, T>;
+
+    fn make_shortcut(
+        _document: &JsonDocument,
+        object: Option<JsonValue>,
+    ) -> anyhow::Result<Self::Shortcut> {
+        match object {
+            Some(JsonValue::Array(array)) => Ok(array),
+            _ => anyhow::bail!("Unexpected JSON type"),
+        }
+    }
+
+    fn view_shortcut<'a>(
+        document: &'a <JsonSchema as SchemaDecodeCodec>::Document,
+        shortcut: Self::Shortcut,
+        args: (),
+    ) -> Self::View<'a> {
+        ArrayView {
+            _ty: PhantomData,
+            view: JsonArrayView {
+                document,
+                handle: shortcut,
+            },
+        }
+    }
+}
+
+#[derive_where(Copy, Clone)]
+pub struct ArrayView<'a, T> {
+    _ty: PhantomData<fn() -> T>,
+    view: JsonArrayView<'a>,
+}
+
+impl<T> fmt::Debug for ArrayView<'_, T>
+where
+    T: DeserializeSchema<JsonSchema, ()>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl<'a, T> ArrayView<'a, T>
+where
+    T: DeserializeSchema<JsonSchema, ()>,
+{
+    pub fn get(self, i: u32) -> Option<anyhow::Result<T::View<'a>>> {
+        self.view
+            .get(i)
+            .map(|object| T::view_object(self.view.document, Some(object.unwrap()), ()))
+    }
+
+    pub fn len(self) -> u32 {
+        self.view.len()
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = anyhow::Result<T::View<'a>>> {
+        (0..self.len()).map_while(move |i| self.get(i))
+    }
+}
+
+impl<T> SchemaView<JsonSchema, ()> for ArrayView<'_, T>
+where
+    T: DeserializeSchema<JsonSchema, ()>,
+{
+    type Reified = Vec<T>;
+    type Shortcut = JsonArray;
+
+    fn validate_deep(&self) -> anyhow::Result<()> {
+        for elem in self.iter() {
+            elem?.validate_deep()?;
+        }
+        Ok(())
+    }
+
+    fn as_shortcut(&self) -> Self::Shortcut {
+        self.view.handle
+    }
+
+    fn reify(&self) -> anyhow::Result<Self::Reified> {
+        let mut out = Vec::<T>::with_capacity(self.len() as usize);
+        for elem in self.iter() {
+            out.push(elem?.reify()?);
+        }
+        Ok(out)
+    }
+}
+
+// Number
+// TODO
+
+// Boolean
+impl DeserializeSchema<JsonSchema, ()> for bool {
+    type Shortcut = bool;
+    type View<'a> = bool;
+
+    fn make_shortcut(
+        document: &JsonDocument,
+        object: Option<JsonValue>,
+    ) -> anyhow::Result<Self::Shortcut> {
+        match object {
+            Some(JsonValue::Boolean(value)) => Ok(value),
+            _ => anyhow::bail!("Unexpected JSON type"),
+        }
+    }
+
+    fn view_shortcut<'a>(
+        _document: &'a JsonDocument,
+        shortcut: Self::Shortcut,
+        _args: (),
+    ) -> Self::View<'a> {
+        shortcut
+    }
+}
+
+impl SchemaView<JsonSchema, ()> for bool {
+    type Reified = bool;
+    type Shortcut = bool;
+
+    fn validate_deep(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn as_shortcut(&self) -> Self::Shortcut {
+        *self
+    }
+
+    fn reify(&self) -> anyhow::Result<Self::Reified> {
+        Ok(*self)
+    }
+}
+
+// String
+#[derive(Debug, Copy, Clone)]
+pub struct StringView<'a> {
+    intern: Intern,
+    text: &'a str,
+}
+
+impl DeserializeSchema<JsonSchema, ()> for String {
+    type Shortcut = Intern;
+    type View<'a> = StringView<'a>;
+
+    fn make_shortcut(
+        _document: &JsonDocument,
+        object: Option<JsonValue>,
+    ) -> anyhow::Result<Self::Shortcut> {
+        match object {
+            Some(JsonValue::String(intern)) => Ok(intern),
+            _ => anyhow::bail!("Unexpected JSON type"),
+        }
+    }
+
+    fn view_shortcut<'a>(document: &'a JsonDocument, shortcut: Intern, args: ()) -> Self::View<'a> {
+        StringView {
+            intern: shortcut,
+            text: document.string_value(shortcut),
+        }
+    }
+}
+
+impl SchemaView<JsonSchema, ()> for StringView<'_> {
+    type Reified = String;
+    type Shortcut = Intern;
+
+    fn validate_deep(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn as_shortcut(&self) -> Self::Shortcut {
+        self.intern
+    }
+
+    fn reify(&self) -> anyhow::Result<Self::Reified> {
+        Ok(self.text.to_string())
     }
 }

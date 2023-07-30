@@ -4,6 +4,7 @@ pub trait Codec: Sized + 'static {}
 
 // === Macros === //
 
+#[doc(hidden)]
 pub mod codec_struct_internals {
     pub(crate) use super::super::{
         decode_seq::derive_seq_decode_macro::derive_seq_decode,

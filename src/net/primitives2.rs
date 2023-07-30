@@ -8,8 +8,8 @@ use crate::util::{
         byte_stream::{ByteCursor, ByteWriteStream, WriteCodepointCounter},
         core::Codec,
         decode_seq::{
-            DeserializeSeq as Deserialize, DeserializeSeqFor as DeserializeFor,
-            DeserializeSeqForSimple as DeserializeForSimple, EndPosSummary, SeqDecodeCodec,
+            DeserializeSeq, DeserializeSeqFor, DeserializeSeqForSimple, EndPosSummary,
+            SeqDecodeCodec,
         },
         encode::{EncodeCodec, SerializeInto, WriteStreamFor},
     },
@@ -40,12 +40,12 @@ impl EncodeCodec for MineCodec {
 // Primitives
 macro_rules! impl_numerics {
 	($($ty:ty),*$(,)?) => {$(
-		impl Deserialize<MineCodec> for $ty {
+		impl DeserializeSeq<MineCodec> for $ty {
 			type Summary = ();
 			type View<'a> = Self;
 		}
 
-		impl DeserializeForSimple<MineCodec, ()> for $ty {
+		impl DeserializeSeqForSimple<MineCodec, ()> for $ty {
 			fn decode_simple<'a>(
 				_bind: [&'a (); 0],
 				cursor: &mut ByteCursor<'a>,
@@ -76,12 +76,12 @@ macro_rules! impl_numerics {
 
 impl_numerics!(i8, u8, i16, u16, i32, u32, i64, f32, f64, u128);
 
-impl Deserialize<MineCodec> for bool {
+impl DeserializeSeq<MineCodec> for bool {
     type Summary = ();
     type View<'a> = Self;
 }
 
-impl DeserializeForSimple<MineCodec, ()> for bool {
+impl DeserializeSeqForSimple<MineCodec, ()> for bool {
     fn decode_simple<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
@@ -119,12 +119,12 @@ impl From<i32> for VarInt {
     }
 }
 
-impl Deserialize<MineCodec> for VarInt {
+impl DeserializeSeq<MineCodec> for VarInt {
     type Summary = EndPosSummary<usize>;
     type View<'a> = i32;
 }
 
-impl DeserializeForSimple<MineCodec, ()> for VarInt {
+impl DeserializeSeqForSimple<MineCodec, ()> for VarInt {
     fn decode_simple<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
@@ -167,12 +167,12 @@ impl From<u32> for VarUint {
     }
 }
 
-impl Deserialize<MineCodec> for VarUint {
+impl DeserializeSeq<MineCodec> for VarUint {
     type Summary = EndPosSummary<usize>;
     type View<'a> = u32;
 }
 
-impl DeserializeForSimple<MineCodec, ()> for VarUint {
+impl DeserializeSeqForSimple<MineCodec, ()> for VarUint {
     fn decode_simple<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
@@ -221,12 +221,12 @@ impl From<&'_ [u8]> for TrailingByteArray {
     }
 }
 
-impl Deserialize<MineCodec> for TrailingByteArray {
+impl DeserializeSeq<MineCodec> for TrailingByteArray {
     type Summary = ();
     type View<'a> = &'a [u8];
 }
 
-impl DeserializeForSimple<MineCodec, ()> for TrailingByteArray {
+impl DeserializeSeqForSimple<MineCodec, ()> for TrailingByteArray {
     fn decode_simple<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
@@ -261,12 +261,12 @@ impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
 }
 
 // String
-impl Deserialize<MineCodec> for String {
+impl DeserializeSeq<MineCodec> for String {
     type Summary = usize;
     type View<'a> = &'a str;
 }
 
-impl DeserializeFor<MineCodec, Option<u32>> for String {
+impl DeserializeSeqFor<MineCodec, Option<u32>> for String {
     fn summarize(
         cursor: &mut ByteCursor,
         max_len: &mut Option<u32>,
@@ -382,7 +382,7 @@ impl<T: fmt::Display> SerializeInto<MineCodec, String, Option<u32>> for T {
     }
 }
 
-impl DeserializeFor<MineCodec, u32> for String {
+impl DeserializeSeqFor<MineCodec, u32> for String {
     fn summarize(cursor: &mut ByteCursor, args: &mut u32) -> anyhow::Result<Self::Summary> {
         Self::summarize(cursor, &mut Some(*args))
     }
@@ -430,12 +430,12 @@ impl From<&'_ str> for Identifier {
     }
 }
 
-impl Deserialize<MineCodec> for Identifier {
-    type Summary = <String as Deserialize<MineCodec>>::Summary;
+impl DeserializeSeq<MineCodec> for Identifier {
+    type Summary = <String as DeserializeSeq<MineCodec>>::Summary;
     type View<'a> = &'a str;
 }
 
-impl DeserializeFor<MineCodec, ()> for Identifier {
+impl DeserializeSeqFor<MineCodec, ()> for Identifier {
     fn summarize(cursor: &mut ByteCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
         String::summarize(cursor, &mut Some(Self::MAX_LEN))
     }
