@@ -1,17 +1,21 @@
-use std::error::Error;
+use std::{error::Error, ops::AddAssign};
+
+use crate::util::error::NeverError;
 
 use super::core::Codec;
 
-// === Traits === //
+// === Codec Traits === //
 
 pub trait EncodeCodec: Codec {
     type WriteElement<'a>: ?Sized;
+    type SizeMetric: SizeMetricFor<Self>;
 }
 
+// WriteStream
 pub trait WriteStream<E: ?Sized> {
-    type Error: 'static + Error + Send + Sync;
+    type PushError: 'static + Error + Send + Sync;
 
-    fn push(&mut self, elem: &E) -> Result<(), Self::Error>;
+    fn push(&mut self, elem: &E) -> Result<(), Self::PushError>;
 }
 
 pub trait WriteStreamFor<C: EncodeCodec>: for<'a> WriteStream<C::WriteElement<'a>> {}
@@ -23,8 +27,50 @@ where
 {
 }
 
+// SizeMetric
+pub trait SizeMetric: 'static + Copy + AddAssign + Default {}
+
+pub trait SizeMetricForElement<E: ?Sized>: SizeMetric {
+    fn size_of(elem: &E) -> Self;
+}
+
+pub trait SizeMetricFor<C: EncodeCodec>: for<'a> SizeMetricForElement<C::WriteElement<'a>> {}
+
+impl<C, T> SizeMetricFor<C> for T
+where
+    C: EncodeCodec,
+    T: for<'a> SizeMetricForElement<C::WriteElement<'a>>,
+{
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SizeCountingWriteStream<M: SizeMetric>(pub M);
+
+impl<M, E> WriteStream<E> for SizeCountingWriteStream<M>
+where
+    M: SizeMetricForElement<E>,
+    E: ?Sized,
+{
+    type PushError = NeverError;
+
+    fn push(&mut self, elem: &E) -> Result<(), Self::PushError> {
+        self.0 += M::size_of(elem);
+        Ok(())
+    }
+}
+
+// TODO: Optimize size metric
+
+// === Serialization traits === //
+
 pub trait SerializeInto<C: EncodeCodec, T, A>: Sized {
     fn serialize(&self, stream: &mut impl WriteStreamFor<C>, args: &mut A) -> anyhow::Result<()>;
+
+    fn size(&self, args: &mut A) -> anyhow::Result<C::SizeMetric> {
+        let mut counter = SizeCountingWriteStream::default();
+        self.serialize(&mut counter, args)?;
+        Ok(counter.0)
+    }
 }
 
 pub trait SerializeFrom<C: EncodeCodec, D, A> {

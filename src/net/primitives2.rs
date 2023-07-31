@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use crate::util::{
     proto::{
-        byte_stream::{ByteCursor, ByteWriteStream, WriteCodepointCounter},
+        byte_stream::{ByteCursor, ByteSize, ByteWriteStream, WriteCodepointCounter},
         core::Codec,
         decode_seq::{
             DeserializeSeq, DeserializeSeqFor, DeserializeSeqForSimple, EndPosSummary,
@@ -15,6 +15,8 @@ use crate::util::{
     },
     var_int::{decode_var_i32_streaming, encode_var_u32},
 };
+
+// === Codec === //
 
 pub struct MineCodec {
     _never: (),
@@ -33,6 +35,7 @@ impl SeqDecodeCodec for MineCodec {
 
 impl EncodeCodec for MineCodec {
     type WriteElement<'a> = [u8];
+    type SizeMetric = ByteSize;
 }
 
 // === Numerics === //
@@ -130,9 +133,8 @@ impl DeserializeSeqForSimple<MineCodec, ()> for VarInt {
         cursor: &mut ByteCursor<'a>,
         _args: &mut (),
     ) -> anyhow::Result<Self::View<'a>> {
-        decode_var_i32_streaming(cursor)?.ok_or_else(|| {
-            anyhow::anyhow!("Invalid unterminated VarInt (location: {})", cursor.pos())
-        })
+        decode_var_i32_streaming(cursor)?
+            .ok_or_else(|| anyhow::anyhow!("Unterminated VarInt (location: {})", cursor.pos()))
     }
 }
 
@@ -287,7 +289,7 @@ impl DeserializeSeqFor<MineCodec, Option<u32>> for String {
                 });
 
             anyhow::ensure!(
-                size <= max_len * 4,
+                size <= max_size,
                 "String byte stream is too long. The string is limited to {max_len} codepoint(s), \
 				 which can be encoded in up to {max_size} bytes, but the size of the string in \
 				 bytes is specified as {size} (location: {}).",
@@ -311,19 +313,18 @@ impl DeserializeSeqFor<MineCodec, Option<u32>> for String {
         codepoints.write_all(data)?;
         let codepoints = codepoints.codepoints().ok_or_else(|| {
             anyhow::anyhow!(
-                "Failed to validate string ending at location {}",
-                cursor.format_location()
+                "String byte data was not valid UTF8 (location: {})",
+                cursor.format_location(),
             )
         })?;
 
         if let Some(max_len) = *max_len {
-            if codepoints > max_len as usize {
-                anyhow::bail!(
-                    "String is too long: can contain at most {max_len} codepoint(s) but \
-					 contains {codepoints} (location: {}).",
-                    cursor.format_location(),
-                );
-            }
+            anyhow::ensure!(
+                codepoints <= max_len as usize,
+                "String is too long: can contain at most {max_len} codepoint(s) but \
+				 contains {codepoints} (location: {}).",
+                cursor.format_location(),
+            );
         }
 
         Ok(start_pos)

@@ -1,8 +1,15 @@
-use std::{fmt, io, str};
+use std::{
+    fmt, io,
+    ops::{Add, AddAssign},
+    str,
+};
 
 use crate::util::format::lazy_format;
 
-use super::{decode_seq::ReadCursor, encode::WriteStream};
+use super::{
+    decode_seq::ReadCursor,
+    encode::{SizeMetric, SizeMetricForElement, WriteStream},
+};
 
 // === Reader === //
 
@@ -90,7 +97,7 @@ impl ReadCursor for ByteCursor<'_> {
 // === Write as Stream === //
 
 impl<T: io::Write> WriteStream<[u8]> for T {
-    type Error = io::Error;
+    type PushError = io::Error;
 
     fn push(&mut self, elem: &[u8]) -> io::Result<()> {
         self.write_all(elem)
@@ -184,5 +191,32 @@ impl WriteCodepointCounter {
 
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+}
+
+// === Byte Size Metric === //
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct ByteSize(pub usize);
+
+impl Add for ByteSize {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl AddAssign for ByteSize {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
+impl SizeMetric for ByteSize {}
+
+impl SizeMetricForElement<[u8]> for ByteSize {
+    fn size_of(elem: &[u8]) -> Self {
+        Self(elem.len())
     }
 }
