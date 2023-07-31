@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData};
+use std::{fmt, marker::PhantomData, ops::Deref};
 
 use derive_where::derive_where;
 use hashbrown::HashMap;
@@ -346,14 +346,27 @@ impl Codec for JsonSchema {}
 
 impl SchemaDecodeCodec for JsonSchema {
     type Document = JsonDocument;
-    type DocumentRef = JsonValue;
+    type AnyRef = JsonValue;
+    type ObjectRef = JsonObject;
 }
 
 impl SchemaDocument for JsonDocument {
     type AnyRef = JsonValue;
+    type ObjectRef = JsonObject;
 
     fn root(&self) -> Self::AnyRef {
         self.root()
+    }
+
+    fn any_ref_as_object(&self, any_ref: Self::AnyRef) -> Result<Self::ObjectRef, Self::AnyRef> {
+        match any_ref {
+            JsonValue::Object(obj) => Ok(obj),
+            value @ _ => Err(value),
+        }
+    }
+
+    fn object_entry(&self, obj: &Self::ObjectRef, key: &str) -> Option<Self::AnyRef> {
+        self.object_field(*obj, key)
     }
 }
 
@@ -422,7 +435,7 @@ where
     ) -> anyhow::Result<Self::Shortcut> {
         match object {
             Some(JsonValue::Array(array)) => Ok(array),
-            _ => anyhow::bail!("Unexpected JSON type"),
+            value @ _ => anyhow::bail!("Expected array, got {value:?}"),
         }
     }
 
@@ -516,7 +529,7 @@ impl DeserializeSchema<JsonSchema, ()> for bool {
     ) -> anyhow::Result<Self::Shortcut> {
         match object {
             Some(JsonValue::Boolean(value)) => Ok(value),
-            _ => anyhow::bail!("Unexpected JSON type"),
+            value @ _ => anyhow::bail!("Expected boolean, got {value:?}"),
         }
     }
 
@@ -563,7 +576,7 @@ impl DeserializeSchema<JsonSchema, ()> for String {
     ) -> anyhow::Result<Self::Shortcut> {
         match object {
             Some(JsonValue::String(intern)) => Ok(intern),
-            _ => anyhow::bail!("Unexpected JSON type"),
+            value @ _ => anyhow::bail!("Expected string, got {value:?}."),
         }
     }
 
@@ -589,5 +602,13 @@ impl SchemaView<JsonSchema, ()> for StringView<'_> {
 
     fn reify(&self) -> anyhow::Result<Self::Reified> {
         Ok(self.text.to_string())
+    }
+}
+
+impl Deref for StringView<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.text
     }
 }

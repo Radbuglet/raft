@@ -52,16 +52,17 @@ where
 // === Derivation Macro === //
 
 #[doc(hidden)]
-pub mod encode_struct_internals {
+pub mod derive_encode_internals {
     pub use {
-        super::{EncodeCodec, SerializeInto},
+        super::{EncodeCodec, SerializeInto, WriteStream},
+        crate::util::proto::core::Codec,
         anyhow,
         std::result::Result::Ok,
     };
 }
 
 macro_rules! derive_encode {
-    ($(
+    (
         $(#[$attr:meta])*
         $struct_vis:vis struct $struct_name:ident($codec:ty) {
             $(
@@ -70,7 +71,7 @@ macro_rules! derive_encode {
 			),*
             $(,)?
         }
-    )*) => {$(
+    ) => {
 		#[derive(Debug, Copy, Clone)]
 		#[allow(non_camel_case_types)]
 		pub struct Builder<$($field_name,)*> {
@@ -78,33 +79,33 @@ macro_rules! derive_encode {
 		}
 
 		#[allow(non_camel_case_types, unused_parens)]
-		impl<$($field_name,)*> $crate::util::proto::encode::encode_struct_internals::SerializeInto<$codec, $struct_name, ()> for Builder<$($field_name,)*>
+		impl<$($field_name,)*> $crate::util::proto::encode::derive_encode_internals::SerializeInto<$codec, $struct_name, ()> for Builder<$($field_name,)*>
 		where
-			$($field_name: $crate::util::proto::encode::encode_struct_internals::SerializeInto<$codec, $field_ty, ($($config_ty)?)>,)*
+			$($field_name: $crate::util::proto::encode::derive_encode_internals::SerializeInto<$codec, $field_ty, ($($config_ty)?)>,)*
 		{
 			fn serialize(
 				&self,
 				stream: &mut impl for<'a>
-					$crate::util::proto::encode::encode_struct_internals::WriteStream<
-						<$codec as $crate::util::proto::encode::encode_struct_internals::Codec>::WriteElement<'a>>,
+					$crate::util::proto::encode::derive_encode_internals::WriteStream<
+						<$codec as $crate::util::proto::encode::derive_encode_internals::Codec>::WriteElement<'a>>,
 				_args: &mut (),
-			) -> $crate::util::proto::encode::encode_struct_internals::anyhow::Result<()> {
+			) -> $crate::util::proto::encode::derive_encode_internals::anyhow::Result<()> {
 				let _ = &stream;
 
 				$(
-					$crate::util::proto::encode::encode_struct_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::serialize(
+					$crate::util::proto::encode::derive_encode_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::serialize(
 						&self.$field_name,
 						stream,
 						&mut {$($config)?},
 					)?;
 				)*
 
-				$crate::util::proto::encode::encode_struct_internals::Ok(())
+				$crate::util::proto::encode::derive_encode_internals::Ok(())
 			}
 		}
 
 		// TODO: Ensure that reified form can also serialize.
-	)*};
+	};
 }
 
 pub(super) mod derive_encode_macro {

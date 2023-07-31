@@ -238,7 +238,8 @@ where
 
 // === Derivation Macro === //
 
-pub mod decode_struct_internals {
+#[doc(hidden)]
+pub mod derive_seq_decode_internals {
     pub use {
         super::{DeserializeSeq, DeserializeSeqFor, ReadCursor, SeqDecodeCodec},
         anyhow,
@@ -253,7 +254,7 @@ pub mod decode_struct_internals {
 }
 
 macro_rules! derive_seq_decode {
-    ($(
+    (
         $(#[$attr:meta])*
         $struct_vis:vis struct $struct_name:ident($codec:ty) {
             $(
@@ -262,18 +263,18 @@ macro_rules! derive_seq_decode {
 			),*
             $(,)?
         }
-    )*) => {$(
+    ) => {
 		// Structure definitions
 		#[derive(Debug, Copy, Clone)]
 		pub struct Summary {
-			$($field_name: <$field_ty as $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeq<$codec>>::Summary,)*
+			$($field_name: <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec>>::Summary,)*
 		}
 
 		#[derive(Clone)]
 		pub struct View<'a> {
 			// Safety invariant: the cursor and all the summary's elements have the same backing buffer.
 			summary: &'a Summary,
-			cursor: <$codec as $crate::util::proto::decode_seq::decode_struct_internals::SeqDecodeCodec>::Reader<'a>,
+			cursor: <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'a>,
 		}
 
 		#[derive(Debug, Copy, Clone)]
@@ -283,21 +284,21 @@ macro_rules! derive_seq_decode {
 		}
 
 		// Deserialization
-		impl $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeq<$codec> for $struct_name {
+		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec> for $struct_name {
 			type Summary = Summary;
 			type View<'a> = View<'a>;
 		}
 
-		impl $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeqFor<$codec, ()> for $struct_name {
+		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ()> for $struct_name {
 			fn summarize(
-				cursor: &mut <$codec as $crate::util::proto::decode_seq::decode_struct_internals::SeqDecodeCodec>::Reader<'_>,
+				cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>,
 				_args: &mut (),
-			) -> $crate::util::proto::decode_seq::decode_struct_internals::anyhow::Result<Self::Summary> {
+			) -> $crate::util::proto::decode_seq::derive_seq_decode_internals::anyhow::Result<Self::Summary> {
 				let _ = &cursor;
 
-				$crate::util::proto::decode_seq::decode_struct_internals::Ok(Summary {$(
+				$crate::util::proto::decode_seq::derive_seq_decode_internals::Ok(Summary {$(
 					#[allow(unused_parens)]
-					$field_name: <$field_ty as $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeqFor::<$codec, ($($config_ty)?)>>::summarize(
+					$field_name: <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor::<$codec, ($($config_ty)?)>>::summarize(
 						cursor,
 						&mut {$($config)?},
 					)?,
@@ -306,7 +307,7 @@ macro_rules! derive_seq_decode {
 
 			unsafe fn view<'a>(
 				summary: &'a Self::Summary,
-				cursor: <$codec as $crate::util::proto::decode_seq::decode_struct_internals::SeqDecodeCodec>::Reader<'a>,
+				cursor: <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'a>,
 				_args: &mut (),
 			) -> Self::View<'a> {
 				// Safety: the caller guarantees that the summary was generated using this cursor's
@@ -318,14 +319,14 @@ macro_rules! derive_seq_decode {
 
 			fn skip(
 				summary: &Self::Summary,
-				cursor: &mut <$codec as $crate::util::proto::decode_seq::decode_struct_internals::SeqDecodeCodec>::Reader<'_>,
+				cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>,
 				_args: &mut (),
 			) {
 				let _ = (summary, &cursor);
 
 				$(
 					#[allow(unused_parens)]
-					<$field_ty as $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::skip(
+					<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::skip(
 						&summary.$field_name,
 						cursor,
 						&mut {$($config)?},
@@ -336,18 +337,18 @@ macro_rules! derive_seq_decode {
 
 		// View accessors
 		struct OffsetsTmp {
-			$($field_name: <$codec as $crate::util::proto::decode_seq::decode_struct_internals::SeqDecodeCodec>::ReaderPos,)*
+			$($field_name: <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::ReaderPos,)*
 		}
 
 		impl View<'_> {
 			fn offsets(&self) -> OffsetsTmp {
-				let mut cursor = $crate::util::proto::decode_seq::decode_struct_internals::Clone::clone(&self.cursor);
+				let mut cursor = $crate::util::proto::decode_seq::derive_seq_decode_internals::Clone::clone(&self.cursor);
 
 				$(
-					let $field_name = $crate::util::proto::decode_seq::decode_struct_internals::ReadStream::pos(&cursor);
+					let $field_name = $crate::util::proto::decode_seq::derive_seq_decode_internals::ReadStream::pos(&cursor);
 
 					#[allow(unused_parens)]
-					<$field_ty as $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::skip(
+					<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::skip(
 						&self.summary.$field_name,
 						&mut cursor,
 						&mut {$($config)?},
@@ -359,12 +360,12 @@ macro_rules! derive_seq_decode {
 		}
 
 		impl<'a> View<'a> {$(
-			pub fn $field_name(&self) -> <$field_ty as $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeq<$codec>>::View<'a> {
+			pub fn $field_name(&self) -> <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec>>::View<'a> {
 				let offset = self.offsets().$field_name;
 				let mut config = {$($config)?};
 
-				let mut cursor = $crate::util::proto::decode_seq::decode_struct_internals::Clone::clone(&self.cursor);
-				$crate::util::proto::decode_seq::decode_struct_internals::ReadStream::set_pos(&mut cursor, offset);
+				let mut cursor = $crate::util::proto::decode_seq::derive_seq_decode_internals::Clone::clone(&self.cursor);
+				$crate::util::proto::decode_seq::derive_seq_decode_internals::ReadStream::set_pos(&mut cursor, offset);
 
 				unsafe {
 					// Safety: by invariant, we know the summary, its sub-element summaries, and
@@ -372,7 +373,7 @@ macro_rules! derive_seq_decode {
 					// valid. We know the config type is constant because `$config_ty` fixes it
 					// to a value.
 					#[allow(unused_parens)]
-					<$field_ty as $crate::util::proto::decode_seq::decode_struct_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::view(
+					<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::view(
 						&self.summary.$field_name,
 						cursor,
 						&mut config,
@@ -382,28 +383,28 @@ macro_rules! derive_seq_decode {
 		)*}
 
 		// View reification
-		impl $crate::util::proto::decode_seq::decode_struct_internals::From<View<'_>> for $struct_name {
+		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::From<View<'_>> for $struct_name {
 			fn from(view: View<'_>) -> Self {
 				let _ = &view;
 
 				Self {
-					$($field_name: $crate::util::proto::decode_seq::decode_struct_internals::From::from(view.$field_name()),)*
+					$($field_name: $crate::util::proto::decode_seq::derive_seq_decode_internals::From::from(view.$field_name()),)*
 				}
 			}
 		}
 
 		// View formatting
-		impl $crate::util::proto::decode_seq::decode_struct_internals::fmt::Debug for View<'_> {
-			fn fmt(&self, f: &mut $crate::util::proto::decode_seq::decode_struct_internals::fmt::Formatter<'_>) -> $crate::util::proto::decode_seq::decode_struct_internals::fmt::Result {
-				f.debug_struct($crate::util::proto::decode_seq::decode_struct_internals::stringify!($struct_name))
+		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::fmt::Debug for View<'_> {
+			fn fmt(&self, f: &mut $crate::util::proto::decode_seq::derive_seq_decode_internals::fmt::Formatter<'_>) -> $crate::util::proto::decode_seq::derive_seq_decode_internals::fmt::Result {
+				f.debug_struct($crate::util::proto::decode_seq::derive_seq_decode_internals::stringify!($struct_name))
 					$(.field(
-						$crate::util::proto::decode_seq::decode_struct_internals::stringify!($field_name),
+						$crate::util::proto::decode_seq::derive_seq_decode_internals::stringify!($field_name),
 						&self.$field_name(),
 					))*
 					.finish()
 			}
 		}
-    )*};
+    };
 }
 
 pub(super) mod derive_seq_decode_macro {
