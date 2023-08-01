@@ -39,7 +39,10 @@ pub trait DeserializeSeq<C: SeqDecodeCodec>: Sized + 'static {
     ///
     /// This view should be lazily evaluated and must provide a mechanism for reifying the view into
     /// its regular type.
-    type View<'a>: fmt::Debug + Into<Self>;
+    type View<'a>: fmt::Debug;
+
+    /// Reifies a view object into an owner version of that object.
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self>;
 }
 
 pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
@@ -76,8 +79,14 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
     /// Skips a cursor starting at the beginning of this element to the start of the next element.
     fn skip(summary: &Self::Summary, cursor: &mut C::Reader<'_>, args: &mut A);
 
-    /// Decodes the reified version of this value in a single pass.
-    fn decode<'a>(cursor: &'a mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self> {
+    fn summarize_and_view<F, R>(
+        cursor: &mut C::Reader<'_>,
+        args: &mut A,
+        mut f: F,
+    ) -> anyhow::Result<R>
+    where
+        F: FnOnce(&mut C::Reader<'_>, Self::View<'_>) -> anyhow::Result<R>,
+    {
         let fork = cursor.clone();
         let summary = Self::summarize(cursor, args)?;
 
@@ -86,7 +95,12 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
             Self::view(&summary, C::covariant_cast(fork), args)
         };
 
-        Ok(view.into())
+        f(cursor, view)
+    }
+
+    /// Decodes the reified version of this value in a single pass.
+    fn decode<'a>(cursor: &'a mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self> {
+        Self::summarize_and_view(cursor, args, |_, view| Self::reify_view(&view))
     }
 }
 
@@ -243,13 +257,7 @@ pub mod derive_seq_decode_internals {
     pub use {
         super::{DeserializeSeq, DeserializeSeqFor, ReadCursor, SeqDecodeCodec},
         anyhow,
-        std::{
-            clone::Clone,
-            convert::{identity, From},
-            fmt,
-            result::Result::Ok,
-            stringify,
-        },
+        std::{clone::Clone, convert::identity, fmt, result::Result::Ok, stringify},
     };
 }
 
@@ -287,6 +295,14 @@ macro_rules! derive_seq_decode {
 		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec> for $struct_name {
 			type Summary = Summary;
 			type View<'a> = View<'a>;
+
+			fn reify_view(view: &Self::View<'_>) -> Self {
+				let _ = view;
+
+				Self {
+					$($field_name: $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq::<$codec>::reify_view(view.$field_name()),)*
+				}
+			}
 		}
 
 		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ()> for $struct_name {
@@ -381,17 +397,6 @@ macro_rules! derive_seq_decode {
 				}
 			}
 		)*}
-
-		// View reification
-		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::From<View<'_>> for $struct_name {
-			fn from(view: View<'_>) -> Self {
-				let _ = &view;
-
-				Self {
-					$($field_name: $crate::util::proto::decode_seq::derive_seq_decode_internals::From::from(view.$field_name()),)*
-				}
-			}
-		}
 
 		// View formatting
 		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::fmt::Debug for View<'_> {

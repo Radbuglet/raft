@@ -57,6 +57,10 @@ impl<'a> ByteCursor<'a> {
         self.remaining.is_empty()
     }
 
+    pub fn advance(&mut self, count: usize) {
+        self.remaining = &self.remaining[count..];
+    }
+
     pub fn advance_remaining(&mut self) {
         self.remaining = &[];
     }
@@ -67,7 +71,7 @@ impl<'a> ByteCursor<'a> {
 
     pub fn read_slice(&mut self, count: usize) -> Option<&'a [u8]> {
         let res = self.remaining.get(0..count)?;
-        self.remaining = &self.remaining[count..];
+        self.advance(count);
 
         Some(res)
     }

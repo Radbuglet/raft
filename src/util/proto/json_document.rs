@@ -28,7 +28,7 @@ struct JsonKey {
 }
 
 impl JsonDocument {
-    pub fn parse(text: &[u8]) -> anyhow::Result<Self> {
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
         // N.B. this check is necessary to allow us to use u32s everywhere.
         assert!(text.len() <= u32::MAX as usize);
 
@@ -38,7 +38,7 @@ impl JsonDocument {
             gen: 0,
         };
 
-        let root = Parser::parse_json_bytes(text, &mut delegate)?;
+        let root = Parser::parse_json(text, &mut delegate)?;
 
         Ok(Self {
             interner: delegate.interner,
@@ -124,21 +124,22 @@ pub enum JsonNumber {
 pub enum JsonValueView<'a> {
     Object(JsonObjectView<'a>),
     Array(JsonArrayView<'a>),
-    String(Intern, &'a str),
+    String(JsonStringView<'a>),
     Number(JsonNumber),
     Boolean(bool),
     Null,
 }
 
 impl<'a> JsonValueView<'a> {
-    pub fn wrap(doc: &'a JsonDocument, value: JsonValue) -> Self {
+    pub fn wrap(document: &'a JsonDocument, value: JsonValue) -> Self {
         match value {
-            JsonValue::Object(handle) => Self::Object(JsonObjectView { doc, handle }),
-            JsonValue::Array(handle) => Self::Array(JsonArrayView {
-                document: doc,
-                handle,
+            JsonValue::Object(handle) => Self::Object(JsonObjectView { document, handle }),
+            JsonValue::Array(handle) => Self::Array(JsonArrayView { document, handle }),
+            JsonValue::String(intern) => Self::String(JsonStringView {
+                document,
+                intern,
+                text: document.string_value(intern),
             }),
-            JsonValue::String(text) => Self::String(text, doc.string_value(text)),
             JsonValue::Number(number) => Self::Number(number),
             JsonValue::Boolean(bool) => Self::Boolean(bool),
             JsonValue::Null => Self::Null,
@@ -149,7 +150,7 @@ impl<'a> JsonValueView<'a> {
         match self {
             JsonValueView::Object(obj) => JsonValue::Object(obj.handle),
             JsonValueView::Array(arr) => JsonValue::Array(arr.handle),
-            JsonValueView::String(intern, _str) => JsonValue::String(intern),
+            JsonValueView::String(str) => JsonValue::String(str.intern),
             JsonValueView::Number(num) => JsonValue::Number(num),
             JsonValueView::Boolean(b) => JsonValue::Boolean(b),
             JsonValueView::Null => JsonValue::Null,
@@ -159,15 +160,15 @@ impl<'a> JsonValueView<'a> {
 
 #[derive(Debug, Copy, Clone)]
 pub struct JsonObjectView<'a> {
-    pub doc: &'a JsonDocument,
+    pub document: &'a JsonDocument,
     pub handle: JsonObject,
 }
 
 impl<'a> JsonObjectView<'a> {
     pub fn get(self, key: &str) -> Option<JsonValueView<'a>> {
-        self.doc
+        self.document
             .object_field(self.handle, key)
-            .map(|handle| JsonValueView::wrap(self.doc, handle))
+            .map(|handle| JsonValueView::wrap(self.document, handle))
     }
 }
 
@@ -190,6 +191,21 @@ impl<'a> JsonArrayView<'a> {
 
     pub fn iter(self) -> impl Iterator<Item = JsonValueView<'a>> + 'a {
         (0..self.len()).map_while(move |i| self.get(i))
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct JsonStringView<'a> {
+    pub document: &'a JsonDocument,
+    pub intern: Intern,
+    pub text: &'a str,
+}
+
+impl Deref for JsonStringView<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.text
     }
 }
 

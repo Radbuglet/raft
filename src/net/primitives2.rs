@@ -7,11 +7,13 @@ use crate::util::{
     proto::{
         byte_stream::{ByteCursor, ByteSize, ByteWriteStream, WriteCodepointCounter},
         core::Codec,
+        decode_schema::{DeserializeSchema, SchemaView},
         decode_seq::{
             DeserializeSeq, DeserializeSeqFor, DeserializeSeqForSimple, EndPosSummary,
             SeqDecodeCodec,
         },
         encode::{EncodeCodec, SerializeInto, WriteStreamFor},
+        json_document::{JsonDocument, JsonSchema},
     },
     var_int::{decode_var_i32_streaming, encode_var_u32},
 };
@@ -46,6 +48,10 @@ macro_rules! impl_numerics {
 		impl DeserializeSeq<MineCodec> for $ty {
 			type Summary = ();
 			type View<'a> = Self;
+
+			fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+				Ok(*view)
+			}
 		}
 
 		impl DeserializeSeqForSimple<MineCodec, ()> for $ty {
@@ -69,7 +75,7 @@ macro_rules! impl_numerics {
 		}
 
 		impl SerializeInto<MineCodec, $ty, ()> for $ty {
-			fn serialize(&self, stream: &mut impl WriteStreamFor<MineCodec>, _args: &mut ()) -> anyhow::Result<()> {
+			fn serialize(&mut self, stream: &mut impl WriteStreamFor<MineCodec>, _args: &mut ()) -> anyhow::Result<()> {
 				stream.push(&self.to_be_bytes())?;
 				Ok(())
 			}
@@ -82,6 +88,10 @@ impl_numerics!(i8, u8, i16, u16, i32, u32, i64, f32, f64, u128);
 impl DeserializeSeq<MineCodec> for bool {
     type Summary = ();
     type View<'a> = Self;
+
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+        Ok(*view)
+    }
 }
 
 impl DeserializeSeqForSimple<MineCodec, ()> for bool {
@@ -104,11 +114,11 @@ impl DeserializeSeqForSimple<MineCodec, ()> for bool {
 
 impl SerializeInto<MineCodec, bool, ()> for bool {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         _args: &mut (),
     ) -> anyhow::Result<()> {
-        SerializeInto::<MineCodec, u8, ()>::serialize(&(*self as u8), stream, &mut ())
+        SerializeInto::<MineCodec, u8, ()>::serialize(&mut (*self as u8), stream, &mut ())
     }
 }
 
@@ -116,15 +126,13 @@ impl SerializeInto<MineCodec, bool, ()> for bool {
 #[derive(Debug, Copy, Clone)]
 pub struct VarInt(pub i32);
 
-impl From<i32> for VarInt {
-    fn from(value: i32) -> Self {
-        Self(value)
-    }
-}
-
 impl DeserializeSeq<MineCodec> for VarInt {
     type Summary = EndPosSummary<usize>;
     type View<'a> = i32;
+
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+        Ok(Self(*view))
+    }
 }
 
 impl DeserializeSeqForSimple<MineCodec, ()> for VarInt {
@@ -140,7 +148,7 @@ impl DeserializeSeqForSimple<MineCodec, ()> for VarInt {
 
 impl SerializeInto<MineCodec, VarInt, ()> for VarInt {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         _args: &mut (),
     ) -> anyhow::Result<()> {
@@ -151,7 +159,7 @@ impl SerializeInto<MineCodec, VarInt, ()> for VarInt {
 
 impl SerializeInto<MineCodec, VarInt, ()> for i32 {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         args: &mut (),
     ) -> anyhow::Result<()> {
@@ -163,15 +171,13 @@ impl SerializeInto<MineCodec, VarInt, ()> for i32 {
 #[derive(Debug, Copy, Clone)]
 pub struct VarUint(pub u32);
 
-impl From<u32> for VarUint {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
 impl DeserializeSeq<MineCodec> for VarUint {
     type Summary = EndPosSummary<usize>;
     type View<'a> = u32;
+
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+        Ok(Self(*view))
+    }
 }
 
 impl DeserializeSeqForSimple<MineCodec, ()> for VarUint {
@@ -192,7 +198,7 @@ impl DeserializeSeqForSimple<MineCodec, ()> for VarUint {
 
 impl SerializeInto<MineCodec, VarUint, ()> for VarUint {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         args: &mut (),
     ) -> anyhow::Result<()> {
@@ -203,7 +209,7 @@ impl SerializeInto<MineCodec, VarUint, ()> for VarUint {
 
 impl SerializeInto<MineCodec, VarUint, ()> for u32 {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         args: &mut (),
     ) -> anyhow::Result<()> {
@@ -217,15 +223,13 @@ impl SerializeInto<MineCodec, VarUint, ()> for u32 {
 #[derive(Debug, Clone)]
 pub struct TrailingByteArray(pub Bytes);
 
-impl From<&'_ [u8]> for TrailingByteArray {
-    fn from(value: &'_ [u8]) -> Self {
-        Self(Bytes::from(Vec::from(value)))
-    }
-}
-
 impl DeserializeSeq<MineCodec> for TrailingByteArray {
     type Summary = ();
     type View<'a> = &'a [u8];
+
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+        Ok(Self(Bytes::from(Vec::from(*view))))
+    }
 }
 
 impl DeserializeSeqForSimple<MineCodec, ()> for TrailingByteArray {
@@ -242,7 +246,7 @@ impl DeserializeSeqForSimple<MineCodec, ()> for TrailingByteArray {
 
 impl SerializeInto<MineCodec, TrailingByteArray, ()> for TrailingByteArray {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         _args: &mut (),
     ) -> anyhow::Result<()> {
@@ -253,7 +257,7 @@ impl SerializeInto<MineCodec, TrailingByteArray, ()> for TrailingByteArray {
 
 impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         _args: &mut (),
     ) -> anyhow::Result<()> {
@@ -266,6 +270,10 @@ impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
 impl DeserializeSeq<MineCodec> for String {
     type Summary = usize;
     type View<'a> = &'a str;
+
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+        Ok(String::from(*view))
+    }
 }
 
 impl DeserializeSeqFor<MineCodec, Option<u32>> for String {
@@ -354,7 +362,7 @@ impl DeserializeSeqFor<MineCodec, Option<u32>> for String {
 
 impl<T: fmt::Display> SerializeInto<MineCodec, String, Option<u32>> for T {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         args: &mut Option<u32>,
     ) -> anyhow::Result<()> {
@@ -403,7 +411,7 @@ impl DeserializeSeqFor<MineCodec, u32> for String {
 
 impl<T: fmt::Display> SerializeInto<MineCodec, String, u32> for T {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         args: &mut u32,
     ) -> anyhow::Result<()> {
@@ -425,15 +433,13 @@ impl fmt::Display for Identifier {
     }
 }
 
-impl From<&'_ str> for Identifier {
-    fn from(value: &'_ str) -> Self {
-        Self(String::from(value))
-    }
-}
-
 impl DeserializeSeq<MineCodec> for Identifier {
     type Summary = <String as DeserializeSeq<MineCodec>>::Summary;
     type View<'a> = &'a str;
+
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+        Ok(Self(String::from(*view)))
+    }
 }
 
 impl DeserializeSeqFor<MineCodec, ()> for Identifier {
@@ -456,7 +462,7 @@ impl DeserializeSeqFor<MineCodec, ()> for Identifier {
 
 impl<T: fmt::Display> SerializeInto<MineCodec, Identifier, ()> for T {
     fn serialize(
-        &self,
+        &mut self,
         stream: &mut impl WriteStreamFor<MineCodec>,
         _args: &mut (),
     ) -> anyhow::Result<()> {
@@ -465,5 +471,43 @@ impl<T: fmt::Display> SerializeInto<MineCodec, Identifier, ()> for T {
             stream,
             &mut Some(Identifier::MAX_LEN),
         )
+    }
+}
+
+// JSON
+#[derive(Debug, Clone)]
+pub struct Json<T>(pub T);
+
+pub trait MineProtoJsonValue: DeserializeSchema<JsonSchema, ()> {
+    const MAX_LEN: u32;
+}
+
+impl<T: MineProtoJsonValue> DeserializeSeq<MineCodec> for Json<T> {
+    type Summary = (JsonDocument, usize);
+    type View<'a> = T::View<'a>;
+
+    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
+        Ok(Self(view.reify()?))
+    }
+}
+
+impl<T: MineProtoJsonValue> DeserializeSeqFor<MineCodec, ()> for Json<T> {
+    fn summarize(cursor: &mut ByteCursor, args: &mut ()) -> anyhow::Result<Self::Summary> {
+        String::summarize_and_view(cursor, &mut T::MAX_LEN, |cursor, text| {
+            Ok((JsonDocument::parse(text)?, cursor.pos()))
+        })
+    }
+
+    unsafe fn view<'a>(
+        summary: &'a Self::Summary,
+        cursor: ByteCursor<'a>,
+        args: &mut (),
+    ) -> Self::View<'a> {
+        // FIXME: Error handling
+        T::view_object(&summary.0, Some(summary.0.root()), ()).unwrap()
+    }
+
+    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, args: &mut ()) {
+        cursor.set_pos(summary.1);
     }
 }

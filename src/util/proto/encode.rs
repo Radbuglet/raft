@@ -59,14 +59,16 @@ where
     }
 }
 
-// TODO: Optimize size metric
-
 // === Serialization traits === //
 
 pub trait SerializeInto<C: EncodeCodec, T, A>: Sized {
-    fn serialize(&self, stream: &mut impl WriteStreamFor<C>, args: &mut A) -> anyhow::Result<()>;
+    fn serialize(
+        &mut self,
+        stream: &mut impl WriteStreamFor<C>,
+        args: &mut A,
+    ) -> anyhow::Result<()>;
 
-    fn size(&self, args: &mut A) -> anyhow::Result<C::SizeMetric> {
+    fn size(&mut self, args: &mut A) -> anyhow::Result<C::SizeMetric> {
         let mut counter = SizeCountingWriteStream::default();
         self.serialize(&mut counter, args)?;
         Ok(counter.0)
@@ -79,6 +81,8 @@ pub trait SerializeFrom<C: EncodeCodec, D, A> {
         stream: &mut impl WriteStreamFor<C>,
         args: &mut A,
     ) -> anyhow::Result<()>;
+
+    fn size(value: &mut D, args: &mut A) -> anyhow::Result<C::SizeMetric>;
 }
 
 impl<C: EncodeCodec, T, D, A> SerializeFrom<C, D, A> for T
@@ -93,6 +97,10 @@ where
     ) -> anyhow::Result<()> {
         value.serialize(stream, args)
     }
+
+    fn size(value: &mut D, args: &mut A) -> anyhow::Result<C::SizeMetric> {
+        value.size(args)
+    }
 }
 
 // === Derivation Macro === //
@@ -103,7 +111,7 @@ pub mod derive_encode_internals {
         super::{EncodeCodec, SerializeInto, WriteStream},
         crate::util::proto::core::Codec,
         anyhow,
-        std::result::Result::Ok,
+        std::{default::Default, result::Result::Ok},
     };
 }
 
@@ -130,7 +138,7 @@ macro_rules! derive_encode {
 			$($field_name: $crate::util::proto::encode::derive_encode_internals::SerializeInto<$codec, $field_ty, ($($config_ty)?)>,)*
 		{
 			fn serialize(
-				&self,
+				&mut self,
 				stream: &mut impl for<'a>
 					$crate::util::proto::encode::derive_encode_internals::WriteStream<
 						<$codec as $crate::util::proto::encode::derive_encode_internals::Codec>::WriteElement<'a>>,
@@ -140,13 +148,28 @@ macro_rules! derive_encode {
 
 				$(
 					$crate::util::proto::encode::derive_encode_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::serialize(
-						&self.$field_name,
+						&mut self.$field_name,
 						stream,
 						&mut {$($config)?},
 					)?;
 				)*
 
 				$crate::util::proto::encode::derive_encode_internals::Ok(())
+			}
+
+			fn size(&mut self, _args: &mut ()) -> $crate::util::proto::encode::derive_encode_internals::anyhow::Result<
+				<$codec as $crate::util::proto::encode::derive_encode_internals::Codec>::SizeMetric,
+			> {
+				let counter = $crate::util::proto::encode::derive_encode_internals::Default::default();
+
+				$(
+					let counter = counter + $crate::util::proto::encode::derive_encode_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::size(
+						&mut self.$field_name,
+						&mut {$($config)?},
+					)?;
+				)*
+
+				$crate::util::proto::encode::derive_encode_internals::Ok(counter)
 			}
 		}
 
