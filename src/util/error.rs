@@ -4,7 +4,7 @@ use std::{error::Error, fmt};
 pub enum NeverError {}
 
 impl fmt::Debug for NeverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             _ => unreachable!(),
         }
@@ -12,7 +12,7 @@ impl fmt::Debug for NeverError {
 }
 
 impl fmt::Display for NeverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             _ => unreachable!(),
         }

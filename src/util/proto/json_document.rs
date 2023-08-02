@@ -8,7 +8,9 @@ use crate::util::interner::{Intern, Interner};
 
 use super::{
     core::Codec,
-    decode_schema::{DeserializeSchema, SchemaDecodeCodec, SchemaDocument, SchemaView},
+    decode_schema::{
+        DeserializeSchema, SchemaDecodeCodec, SchemaDocument, SchemaView, ValidatedSchemaView,
+    },
 };
 
 // === JsonDocument === //
@@ -393,6 +395,7 @@ where
 {
     type Shortcut = Option<T::Shortcut>;
     type View<'a> = Option<T::View<'a>>;
+    type ValidatedView<'a> = Option<T::ValidatedView<'a>>;
 
     fn make_shortcut(
         document: &JsonDocument,
@@ -400,7 +403,7 @@ where
     ) -> anyhow::Result<Self::Shortcut> {
         match object {
             None | Some(JsonValue::Null) => Ok(None),
-            value @ _ => Ok(Some(T::make_shortcut(document, object)?)),
+            Some(value) => Ok(Some(T::make_shortcut(document, Some(value))?)),
         }
     }
 
@@ -416,6 +419,11 @@ where
 impl<V: SchemaView<JsonSchema, ()>> SchemaView<JsonSchema, ()> for Option<V> {
     type Reified = Option<V::Reified>;
     type Shortcut = Option<V::Shortcut>;
+    type Validated = Option<V::Validated>;
+
+    fn assume_valid(self) -> Self::Validated {
+        self.map(|v| v.assume_valid())
+    }
 
     fn validate_deep(&self) -> anyhow::Result<()> {
         if let Some(inner) = self {
@@ -425,7 +433,7 @@ impl<V: SchemaView<JsonSchema, ()>> SchemaView<JsonSchema, ()> for Option<V> {
     }
 
     fn as_shortcut(&self) -> Self::Shortcut {
-        self.map(|v| v.as_shortcut())
+        self.as_ref().map(|v| v.as_shortcut())
     }
 
     fn reify(&self) -> anyhow::Result<Self::Reified> {
@@ -437,6 +445,24 @@ impl<V: SchemaView<JsonSchema, ()>> SchemaView<JsonSchema, ()> for Option<V> {
     }
 }
 
+impl<V: ValidatedSchemaView<JsonSchema, ()>> ValidatedSchemaView<JsonSchema, ()> for Option<V> {
+    type Reified = Option<V::Reified>;
+    type Shortcut = Option<V::Shortcut>;
+    type RawView = Option<V::RawView>;
+
+    fn unwrap_validation(self) -> Self::RawView {
+        self.map(|v| v.unwrap_validation())
+    }
+
+    fn as_shortcut_validated(&self) -> Self::Shortcut {
+        self.as_ref().map(|v| v.as_shortcut_validated())
+    }
+
+    fn reify_validated(&self) -> Self::Reified {
+        self.as_ref().map(|v| v.reify_validated())
+    }
+}
+
 // Array
 impl<T> DeserializeSchema<JsonSchema, ()> for Vec<T>
 where
@@ -444,6 +470,7 @@ where
 {
     type Shortcut = JsonArray;
     type View<'a> = ArrayView<'a, T>;
+    type ValidatedView<'a> = ValidatedArrayView<'a, T>;
 
     fn make_shortcut(
         _document: &JsonDocument,
@@ -458,7 +485,7 @@ where
     fn view_shortcut<'a>(
         document: &'a <JsonSchema as SchemaDecodeCodec>::Document,
         shortcut: Self::Shortcut,
-        args: (),
+        _args: (),
     ) -> Self::View<'a> {
         ArrayView {
             _ty: PhantomData,
@@ -504,12 +531,17 @@ where
     }
 }
 
-impl<T> SchemaView<JsonSchema, ()> for ArrayView<'_, T>
+impl<'a, T> SchemaView<JsonSchema, ()> for ArrayView<'a, T>
 where
     T: DeserializeSchema<JsonSchema, ()>,
 {
     type Reified = Vec<T>;
     type Shortcut = JsonArray;
+    type Validated = ValidatedArrayView<'a, T>;
+
+    fn assume_valid(self) -> Self::Validated {
+        ValidatedArrayView(self)
+    }
 
     fn validate_deep(&self) -> anyhow::Result<()> {
         for elem in self.iter() {
@@ -531,6 +563,48 @@ where
     }
 }
 
+#[derive_where(Debug; T: DeserializeSchema<JsonSchema, ()>)]
+#[derive_where(Copy, Clone)]
+pub struct ValidatedArrayView<'a, T>(pub ArrayView<'a, T>);
+
+impl<'a, T> ValidatedArrayView<'a, T>
+where
+    T: DeserializeSchema<JsonSchema, ()>,
+{
+    pub fn get(self, i: u32) -> Option<T::View<'a>> {
+        self.0.get(i).map(|v| v.unwrap())
+    }
+
+    pub fn len(self) -> u32 {
+        self.0.len()
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = T::View<'a>> {
+        self.0.iter().map(|v| v.unwrap())
+    }
+}
+
+impl<'a, T> ValidatedSchemaView<JsonSchema, ()> for ValidatedArrayView<'a, T>
+where
+    T: DeserializeSchema<JsonSchema, ()>,
+{
+    type Reified = Vec<T>;
+    type Shortcut = JsonArray;
+    type RawView = ArrayView<'a, T>;
+
+    fn unwrap_validation(self) -> Self::RawView {
+        self.0
+    }
+
+    fn as_shortcut_validated(&self) -> Self::Shortcut {
+        self.0.as_shortcut()
+    }
+
+    fn reify_validated(&self) -> Self::Reified {
+        self.0.reify().unwrap()
+    }
+}
+
 // Number
 // TODO
 
@@ -538,9 +612,10 @@ where
 impl DeserializeSchema<JsonSchema, ()> for bool {
     type Shortcut = bool;
     type View<'a> = bool;
+    type ValidatedView<'a> = bool;
 
     fn make_shortcut(
-        document: &JsonDocument,
+        _document: &JsonDocument,
         object: Option<JsonValue>,
     ) -> anyhow::Result<Self::Shortcut> {
         match object {
@@ -561,6 +636,11 @@ impl DeserializeSchema<JsonSchema, ()> for bool {
 impl SchemaView<JsonSchema, ()> for bool {
     type Reified = bool;
     type Shortcut = bool;
+    type Validated = Self;
+
+    fn assume_valid(self) -> Self::Validated {
+        self
+    }
 
     fn validate_deep(&self) -> anyhow::Result<()> {
         Ok(())
@@ -575,6 +655,24 @@ impl SchemaView<JsonSchema, ()> for bool {
     }
 }
 
+impl ValidatedSchemaView<JsonSchema, ()> for bool {
+    type Reified = bool;
+    type Shortcut = bool;
+    type RawView = Self;
+
+    fn unwrap_validation(self) -> Self::RawView {
+        self
+    }
+
+    fn as_shortcut_validated(&self) -> Self::Shortcut {
+        *self
+    }
+
+    fn reify_validated(&self) -> Self::Reified {
+        *self
+    }
+}
+
 // String
 #[derive(Debug, Copy, Clone)]
 pub struct StringView<'a> {
@@ -585,6 +683,7 @@ pub struct StringView<'a> {
 impl DeserializeSchema<JsonSchema, ()> for String {
     type Shortcut = Intern;
     type View<'a> = StringView<'a>;
+    type ValidatedView<'a> = StringView<'a>;
 
     fn make_shortcut(
         _document: &JsonDocument,
@@ -596,7 +695,11 @@ impl DeserializeSchema<JsonSchema, ()> for String {
         }
     }
 
-    fn view_shortcut<'a>(document: &'a JsonDocument, shortcut: Intern, args: ()) -> Self::View<'a> {
+    fn view_shortcut<'a>(
+        document: &'a JsonDocument,
+        shortcut: Intern,
+        _args: (),
+    ) -> Self::View<'a> {
         StringView {
             intern: shortcut,
             text: document.string_value(shortcut),
@@ -607,6 +710,11 @@ impl DeserializeSchema<JsonSchema, ()> for String {
 impl SchemaView<JsonSchema, ()> for StringView<'_> {
     type Reified = String;
     type Shortcut = Intern;
+    type Validated = Self;
+
+    fn assume_valid(self) -> Self::Validated {
+        self
+    }
 
     fn validate_deep(&self) -> anyhow::Result<()> {
         Ok(())
@@ -618,6 +726,24 @@ impl SchemaView<JsonSchema, ()> for StringView<'_> {
 
     fn reify(&self) -> anyhow::Result<Self::Reified> {
         Ok(self.text.to_string())
+    }
+}
+
+impl ValidatedSchemaView<JsonSchema, ()> for StringView<'_> {
+    type Reified = String;
+    type Shortcut = Intern;
+    type RawView = Self;
+
+    fn unwrap_validation(self) -> Self::RawView {
+        self
+    }
+
+    fn as_shortcut_validated(&self) -> Self::Shortcut {
+        self.intern
+    }
+
+    fn reify_validated(&self) -> Self::Reified {
+        self.text.to_string()
     }
 }
 

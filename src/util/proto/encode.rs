@@ -77,7 +77,7 @@ pub trait SerializeInto<C: EncodeCodec, T, A>: Sized {
 
 pub trait SerializeFrom<C: EncodeCodec, D, A> {
     fn serialize_from(
-        value: &D,
+        value: &mut D,
         stream: &mut impl WriteStreamFor<C>,
         args: &mut A,
     ) -> anyhow::Result<()>;
@@ -91,7 +91,7 @@ where
     D: SerializeInto<C, T, A>,
 {
     fn serialize_from(
-        value: &D,
+        value: &mut D,
         stream: &mut impl WriteStreamFor<C>,
         args: &mut A,
     ) -> anyhow::Result<()> {

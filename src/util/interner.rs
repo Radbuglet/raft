@@ -9,17 +9,19 @@ cfgenius::define! {
     has_debug_printing = false();
 }
 
+cfgenius::cond! {
+    if macro(has_debug_printing) {
+        type TextTy = &'static str;
+    } else {
+        type TextTy = ();
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 #[derive_where(Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Intern {
     #[derive_where(skip)]
-    text: cfgenius::cond! {
-        if macro(has_debug_printing) {
-            Option<&'static str>
-        } else {
-            ()
-        }
-    },
+    text: TextTy,
     id: u32,
 }
 
@@ -83,7 +85,7 @@ impl Interner {
         self.begin_intern().with_iter(iter).finish()
     }
 
-    pub fn decode(&mut self, intern: Intern) -> &str {
+    pub fn decode(&self, intern: Intern) -> &str {
         let (offset, len) = self.intern_entries[intern.id as usize];
         &self.buffer[offset..][..len]
     }

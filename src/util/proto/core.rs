@@ -76,15 +76,16 @@ macro_rules! schema_codec_struct {
 				$(pub $field_name: $field_ty,)*
 			}
 
-			$crate::util::proto::core::codec_struct_internals::derive_encode! {
-				$(#[$attr])*
-				$struct_vis struct $struct_name($codec) {
-					$(
-						$(#[$field_attr])*
-						$field_name: $field_ty $(=> $config_ty : $config)?
-					),*
-				}
-			}
+			// TODO: Re-enable
+			// $crate::util::proto::core::codec_struct_internals::derive_encode! {
+			// 	$(#[$attr])*
+			// 	$struct_vis struct $struct_name($codec) {
+			// 		$(
+			// 			$(#[$field_attr])*
+			// 			$field_name: $field_ty $(=> $config_ty : $config)?
+			// 		),*
+			// 	}
+			// }
 
 			$crate::util::proto::core::codec_struct_internals::derive_schema_decode! {
 				$(#[$attr])*

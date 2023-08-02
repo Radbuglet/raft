@@ -6,8 +6,8 @@ use bytes::Bytes;
 use crate::util::{
     proto::{
         byte_stream::{ByteCursor, ByteSize, ByteWriteStream, WriteCodepointCounter},
-        core::Codec,
-        decode_schema::{DeserializeSchema, SchemaView},
+        core::{schema_codec_struct, Codec},
+        decode_schema::{DeserializeSchema, SchemaView, ValidatedSchemaView},
         decode_seq::{
             DeserializeSeq, DeserializeSeqFor, DeserializeSeqForSimple, EndPosSummary,
             SeqDecodeCodec,
@@ -17,6 +17,8 @@ use crate::util::{
     },
     var_int::{decode_var_i32_streaming, encode_var_u32},
 };
+
+use self::chat_component::ChatComponent;
 
 // === Codec === //
 
@@ -49,8 +51,8 @@ macro_rules! impl_numerics {
 			type Summary = ();
 			type View<'a> = Self;
 
-			fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-				Ok(*view)
+			fn reify_view(view: &Self::View<'_>) -> Self {
+				*view
 			}
 		}
 
@@ -89,8 +91,8 @@ impl DeserializeSeq<MineCodec> for bool {
     type Summary = ();
     type View<'a> = Self;
 
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-        Ok(*view)
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        *view
     }
 }
 
@@ -130,8 +132,8 @@ impl DeserializeSeq<MineCodec> for VarInt {
     type Summary = EndPosSummary<usize>;
     type View<'a> = i32;
 
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-        Ok(Self(*view))
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        Self(*view)
     }
 }
 
@@ -175,8 +177,8 @@ impl DeserializeSeq<MineCodec> for VarUint {
     type Summary = EndPosSummary<usize>;
     type View<'a> = u32;
 
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-        Ok(Self(*view))
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        Self(*view)
     }
 }
 
@@ -227,8 +229,8 @@ impl DeserializeSeq<MineCodec> for TrailingByteArray {
     type Summary = ();
     type View<'a> = &'a [u8];
 
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-        Ok(Self(Bytes::from(Vec::from(*view))))
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        Self(Bytes::from(Vec::from(*view)))
     }
 }
 
@@ -271,8 +273,8 @@ impl DeserializeSeq<MineCodec> for String {
     type Summary = usize;
     type View<'a> = &'a str;
 
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-        Ok(String::from(*view))
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        String::from(*view)
     }
 }
 
@@ -437,8 +439,8 @@ impl DeserializeSeq<MineCodec> for Identifier {
     type Summary = <String as DeserializeSeq<MineCodec>>::Summary;
     type View<'a> = &'a str;
 
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-        Ok(Self(String::from(*view)))
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        Self(String::from(*view))
     }
 }
 
@@ -484,30 +486,49 @@ pub trait MineProtoJsonValue: DeserializeSchema<JsonSchema, ()> {
 
 impl<T: MineProtoJsonValue> DeserializeSeq<MineCodec> for Json<T> {
     type Summary = (JsonDocument, usize);
-    type View<'a> = T::View<'a>;
+    type View<'a> = T::ValidatedView<'a>;
 
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self> {
-        Ok(Self(view.reify()?))
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        Self(view.reify_validated())
     }
 }
 
 impl<T: MineProtoJsonValue> DeserializeSeqFor<MineCodec, ()> for Json<T> {
-    fn summarize(cursor: &mut ByteCursor, args: &mut ()) -> anyhow::Result<Self::Summary> {
-        String::summarize_and_view(cursor, &mut T::MAX_LEN, |cursor, text| {
-            Ok((JsonDocument::parse(text)?, cursor.pos()))
+    fn summarize(cursor: &mut ByteCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
+        String::summarize_and_view(cursor, &mut Some(T::MAX_LEN), |cursor, text| {
+            let document = JsonDocument::parse(text)?;
+            T::view_object(&document, Some(document.root()), ())?.validate_deep()?;
+
+            Ok((document, cursor.pos()))
         })
     }
 
     unsafe fn view<'a>(
         summary: &'a Self::Summary,
-        cursor: ByteCursor<'a>,
-        args: &mut (),
+        _cursor: ByteCursor<'a>,
+        _args: &mut (),
     ) -> Self::View<'a> {
-        // FIXME: Error handling
-        T::view_object(&summary.0, Some(summary.0.root()), ()).unwrap()
+        T::view_object(&summary.0, Some(summary.0.root()), ())
+            .unwrap()
+            .assume_valid()
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, args: &mut ()) {
+    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, _args: &mut ()) {
         cursor.set_pos(summary.1);
     }
+}
+
+// Chat
+pub type Chat = Json<ChatComponent>;
+
+schema_codec_struct! {
+    pub struct chat_component::ChatComponent(JsonSchema) {
+        text: Option<String>,
+        color: Option<String>,
+        // TODO: Finish writing schema
+    }
+}
+
+impl MineProtoJsonValue for ChatComponent {
+    const MAX_LEN: u32 = 262144;
 }

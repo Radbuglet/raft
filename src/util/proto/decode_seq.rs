@@ -42,7 +42,7 @@ pub trait DeserializeSeq<C: SeqDecodeCodec>: Sized + 'static {
     type View<'a>: fmt::Debug;
 
     /// Reifies a view object into an owner version of that object.
-    fn reify_view(view: &Self::View<'_>) -> anyhow::Result<Self>;
+    fn reify_view(view: &Self::View<'_>) -> Self;
 }
 
 pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
@@ -79,11 +79,8 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
     /// Skips a cursor starting at the beginning of this element to the start of the next element.
     fn skip(summary: &Self::Summary, cursor: &mut C::Reader<'_>, args: &mut A);
 
-    fn summarize_and_view<F, R>(
-        cursor: &mut C::Reader<'_>,
-        args: &mut A,
-        mut f: F,
-    ) -> anyhow::Result<R>
+    /// Summarizes and views the deserialized contents of the reader in a single step.
+    fn summarize_and_view<F, R>(cursor: &mut C::Reader<'_>, args: &mut A, f: F) -> anyhow::Result<R>
     where
         F: FnOnce(&mut C::Reader<'_>, Self::View<'_>) -> anyhow::Result<R>,
     {
@@ -98,9 +95,9 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
         f(cursor, view)
     }
 
-    /// Decodes the reified version of this value in a single pass.
+    /// Decodes the reified version of this value in a single step.
     fn decode<'a>(cursor: &'a mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self> {
-        Self::summarize_and_view(cursor, args, |_, view| Self::reify_view(&view))
+        Self::summarize_and_view(cursor, args, |_, view| Ok(Self::reify_view(&view)))
     }
 }
 

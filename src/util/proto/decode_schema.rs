@@ -25,7 +25,21 @@ pub trait SchemaDocument: Sized + 'static {
 
 pub trait DeserializeSchema<C: SchemaDecodeCodec, A>: Sized + 'static {
     type Shortcut: 'static + fmt::Debug + Clone;
-    type View<'a>: SchemaView<C, A, Reified = Self>;
+    type View<'a>: SchemaView<
+        C,
+        A,
+        Validated = Self::ValidatedView<'a>,
+        Shortcut = Self::Shortcut,
+        Reified = Self,
+    >;
+
+    type ValidatedView<'a>: ValidatedSchemaView<
+        C,
+        A,
+        RawView = Self::View<'a>,
+        Shortcut = Self::Shortcut,
+        Reified = Self,
+    >;
 
     fn make_shortcut(
         document: &C::Document,
@@ -48,9 +62,18 @@ pub trait DeserializeSchema<C: SchemaDecodeCodec, A>: Sized + 'static {
     }
 }
 
-pub trait SchemaView<C: SchemaDecodeCodec, A>: fmt::Debug {
+pub trait SchemaView<C: SchemaDecodeCodec, A>: fmt::Debug + Clone {
     type Reified: DeserializeSchema<C, A, Shortcut = Self::Shortcut>;
     type Shortcut: 'static + fmt::Debug + Clone;
+    type Validated: ValidatedSchemaView<
+        C,
+        A,
+        Reified = Self::Reified,
+        Shortcut = Self::Shortcut,
+        RawView = Self,
+    >;
+
+    fn assume_valid(self) -> Self::Validated;
 
     fn validate_deep(&self) -> anyhow::Result<()>;
 
@@ -59,12 +82,32 @@ pub trait SchemaView<C: SchemaDecodeCodec, A>: fmt::Debug {
     fn reify(&self) -> anyhow::Result<Self::Reified>;
 }
 
+pub trait ValidatedSchemaView<C: SchemaDecodeCodec, A>: fmt::Debug + Clone {
+    type Reified: DeserializeSchema<C, A, Shortcut = Self::Shortcut>;
+    type Shortcut: 'static + fmt::Debug + Clone;
+    type RawView: SchemaView<
+        C,
+        A,
+        Reified = Self::Reified,
+        Shortcut = Self::Shortcut,
+        Validated = Self,
+    >;
+
+    fn unwrap_validation(self) -> Self::RawView;
+
+    fn as_shortcut_validated(&self) -> Self::Shortcut;
+
+    fn reify_validated(&self) -> Self::Reified;
+}
+
 // === Derivation Macro === //
 
 #[doc(hidden)]
 pub mod derive_schema_decode_internals {
     pub use {
-        super::{DeserializeSchema, SchemaDecodeCodec, SchemaDocument, SchemaView},
+        super::{
+            DeserializeSchema, SchemaDecodeCodec, SchemaDocument, SchemaView, ValidatedSchemaView,
+        },
         anyhow,
         std::{concat, fmt, option::Option, stringify},
     };
@@ -90,6 +133,7 @@ macro_rules! derive_schema_decode {
         impl $crate::util::proto::decode_schema::derive_schema_decode_internals::DeserializeSchema<$codec, ()> for $struct_name {
 			type Shortcut = <$codec as $crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaDecodeCodec>::ObjectRef;
 			type View<'a> = View<'a>;
+			type ValidatedView<'a> = ValidatedView<'a>;
 
 			fn make_shortcut(
 				document: &<$codec as $crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaDecodeCodec>::Document,
@@ -121,6 +165,11 @@ macro_rules! derive_schema_decode {
 		impl<'a> $crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView<$codec, ()> for View<'a> {
 			type Reified = $struct_name;
 			type Shortcut = <$codec as $crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaDecodeCodec>::ObjectRef;
+			type Validated = ValidatedView<'a>;
+
+			fn assume_valid(self) -> Self::Validated {
+				ValidatedView(self)
+			}
 
 			fn validate_deep(&self) -> $crate::util::proto::decode_schema::derive_schema_decode_internals::anyhow::Result<()> {
 				$($crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ($($config_ty)?)>::validate_deep(
@@ -182,6 +231,38 @@ macro_rules! derive_schema_decode {
 					$(.field($crate::util::proto::decode_schema::derive_schema_decode_internals::stringify!($field_name), &self.$field_name()))*
 					.finish()
 			}
+		}
+
+		#[derive(Debug, Clone)]
+		pub struct ValidatedView<'a>(pub View<'a>);
+
+		impl<'a> $crate::util::proto::decode_schema::derive_schema_decode_internals::ValidatedSchemaView<$codec, ()> for ValidatedView<'a> {
+			type Reified = $struct_name;
+			type Shortcut = <$codec as $crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaDecodeCodec>::ObjectRef;
+			type RawView = View<'a>;
+
+			fn unwrap_validation(self) -> Self::RawView {
+				self.0
+			}
+
+			fn as_shortcut_validated(&self) -> Self::Shortcut {
+				$crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ()>::as_shortcut(&self.0)
+			}
+
+			fn reify_validated(&self) -> Self::Reified {
+				$crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ()>::reify(&self.0).unwrap()
+			}
+		}
+
+		#[allow(unused_parens)]
+		impl<'a> ValidatedView<'a> {
+			$(
+				pub fn $field_name(&self) -> <$field_ty as $crate::util::proto::decode_schema::derive_schema_decode_internals::DeserializeSchema<$codec, ($($config_ty)?)>>::ValidatedView<'a> {
+					$crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ($($config_ty)?)>::assume_valid(
+						self.0.$field_name().unwrap()
+					)
+				}
+			)*
 		}
     };
 }
