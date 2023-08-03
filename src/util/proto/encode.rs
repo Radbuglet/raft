@@ -141,7 +141,7 @@ macro_rules! derive_encode {
 				&mut self,
 				stream: &mut impl for<'a>
 					$crate::util::proto::encode::derive_encode_internals::WriteStream<
-						<$codec as $crate::util::proto::encode::derive_encode_internals::Codec>::WriteElement<'a>>,
+						<$codec as $crate::util::proto::encode::derive_encode_internals::EncodeCodec>::WriteElement<'a>>,
 				_args: &mut (),
 			) -> $crate::util::proto::encode::derive_encode_internals::anyhow::Result<()> {
 				let _ = &stream;
@@ -158,9 +158,10 @@ macro_rules! derive_encode {
 			}
 
 			fn size(&mut self, _args: &mut ()) -> $crate::util::proto::encode::derive_encode_internals::anyhow::Result<
-				<$codec as $crate::util::proto::encode::derive_encode_internals::Codec>::SizeMetric,
+				<$codec as $crate::util::proto::encode::derive_encode_internals::EncodeCodec>::SizeMetric,
 			> {
-				let counter = $crate::util::proto::encode::derive_encode_internals::Default::default();
+				let counter: <$codec as $crate::util::proto::encode::derive_encode_internals::EncodeCodec>::SizeMetric =
+					$crate::util::proto::encode::derive_encode_internals::Default::default();
 
 				$(
 					let counter = counter + $crate::util::proto::encode::derive_encode_internals::SerializeInto::<$codec, $field_ty, ($($config_ty)?)>::size(

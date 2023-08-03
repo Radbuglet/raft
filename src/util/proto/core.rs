@@ -25,6 +25,7 @@ macro_rules! seq_codec_struct {
         }
 	)*) => {$(
 		$struct_vis mod $mod_name {
+			#[allow(unused_imports)]
 			use super::*;
 
 			$(#[$attr])*
@@ -71,6 +72,7 @@ macro_rules! schema_codec_struct {
         }
 	)*) => {$(
 		$struct_vis mod $mod_name {
+			#[allow(unused_imports)]
 			use super::*;
 
 			$(#[$attr])*

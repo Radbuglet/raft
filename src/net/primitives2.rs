@@ -307,8 +307,15 @@ impl DeserializeSeqFor<MineCodec, Option<u32>> for String {
         str::from_utf8_unchecked(data)
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, _args: &mut Option<u32>) {
+    fn skip(
+        summary: &Self::Summary,
+        skip_to_start: impl Fn(&mut ByteCursor),
+        cursor: &mut ByteCursor,
+        _args: &mut Option<u32>,
+    ) {
         debug_assert_eq!(cursor.pos(), *summary);
+
+        skip_to_start(cursor);
         let byte_len = VarInt::decode_simple([], cursor, &mut ()).unwrap();
         let _ = cursor.read_slice(byte_len as usize);
     }
@@ -358,8 +365,13 @@ impl DeserializeSeqFor<MineCodec, u32> for String {
         Self::view(summary, cursor, &mut Some(*args))
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, args: &mut u32) {
-        Self::skip(summary, cursor, &mut Some(*args))
+    fn skip(
+        summary: &Self::Summary,
+        skip_to_start: impl Fn(&mut ByteCursor),
+        cursor: &mut ByteCursor,
+        args: &mut u32,
+    ) {
+        Self::skip(summary, skip_to_start, cursor, &mut Some(*args))
     }
 }
 
@@ -409,8 +421,13 @@ impl DeserializeSeqFor<MineCodec, ()> for Identifier {
         String::view(summary, cursor, &mut Some(Self::MAX_LEN))
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, _args: &mut ()) {
-        String::skip(summary, cursor, &mut Some(Self::MAX_LEN))
+    fn skip(
+        summary: &Self::Summary,
+        skip_to_start: impl Fn(&mut ByteCursor),
+        cursor: &mut ByteCursor,
+        _args: &mut (),
+    ) {
+        String::skip(summary, skip_to_start, cursor, &mut Some(Self::MAX_LEN))
     }
 }
 
@@ -465,7 +482,12 @@ impl<T: MineProtoJsonValue> DeserializeSeqFor<MineCodec, ()> for Json<T> {
             .assume_valid()
     }
 
-    fn skip(summary: &Self::Summary, cursor: &mut ByteCursor, _args: &mut ()) {
+    fn skip(
+        summary: &Self::Summary,
+        _skip_to_start: impl Fn(&mut ByteCursor),
+        cursor: &mut ByteCursor,
+        _args: &mut (),
+    ) {
         cursor.set_pos(summary.1);
     }
 }
@@ -511,7 +533,7 @@ schema_codec_struct! {
 }
 }
 
-impl MineProtoJsonValue for ChatComponent {
+impl MineProtoJsonValue for ChatRoot {
     const MAX_LEN: u32 = 262144;
 }
 
