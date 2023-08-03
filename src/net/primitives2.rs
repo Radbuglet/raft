@@ -2,6 +2,7 @@ use std::{fmt, io::Write, mem, str};
 
 use anyhow::Context;
 use bytes::Bytes;
+use either::Either;
 
 use crate::util::{
     proto::{
@@ -17,8 +18,6 @@ use crate::util::{
     },
     var_int::{decode_var_i32_streaming, encode_var_u32},
 };
-
-use self::chat_component::ChatComponent;
 
 // === Codec === //
 
@@ -219,54 +218,7 @@ impl SerializeInto<MineCodec, VarUint, ()> for u32 {
     }
 }
 
-// === Containers === //
-
-// TrailingByteArray
-#[derive(Debug, Clone)]
-pub struct TrailingByteArray(pub Bytes);
-
-impl DeserializeSeq<MineCodec> for TrailingByteArray {
-    type Summary = ();
-    type View<'a> = &'a [u8];
-
-    fn reify_view(view: &Self::View<'_>) -> Self {
-        Self(Bytes::from(Vec::from(*view)))
-    }
-}
-
-impl DeserializeSeqForSimple<MineCodec, ()> for TrailingByteArray {
-    fn decode_simple<'a>(
-        _bind: [&'a (); 0],
-        cursor: &mut ByteCursor<'a>,
-        _args: &mut (),
-    ) -> anyhow::Result<Self::View<'a>> {
-        let remaining = cursor.remaining();
-        cursor.advance_remaining();
-        Ok(remaining)
-    }
-}
-
-impl SerializeInto<MineCodec, TrailingByteArray, ()> for TrailingByteArray {
-    fn serialize(
-        &mut self,
-        stream: &mut impl WriteStreamFor<MineCodec>,
-        _args: &mut (),
-    ) -> anyhow::Result<()> {
-        stream.push(&self.0)?;
-        Ok(())
-    }
-}
-
-impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
-    fn serialize(
-        &mut self,
-        stream: &mut impl WriteStreamFor<MineCodec>,
-        _args: &mut (),
-    ) -> anyhow::Result<()> {
-        stream.push(self)?;
-        Ok(())
-    }
-}
+// === Strings === //
 
 // String
 impl DeserializeSeq<MineCodec> for String {
@@ -489,7 +441,7 @@ impl<T: MineProtoJsonValue> DeserializeSeq<MineCodec> for Json<T> {
     type View<'a> = T::ValidatedView<'a>;
 
     fn reify_view(view: &Self::View<'_>) -> Self {
-        Self(view.reify_validated())
+        Self(view.reify())
     }
 }
 
@@ -519,16 +471,95 @@ impl<T: MineProtoJsonValue> DeserializeSeqFor<MineCodec, ()> for Json<T> {
 }
 
 // Chat
-pub type Chat = Json<ChatComponent>;
+pub type Chat = Json<ChatRoot>;
+
+pub type ChatRoot = Either<Vec<ChatComponent>, ChatComponent>;
 
 schema_codec_struct! {
     pub struct chat_component::ChatComponent(JsonSchema) {
         text: Option<String>,
+        translate: Option<String>,
+        keybind: Option<String>,
+        bold: Option<bool>,
+        italic: Option<bool>,
+        underlined: Option<bool>,
+        strikethrough: Option<bool>,
+        obfuscated: Option<bool>,
+        font: Option<String>,
         color: Option<String>,
-        // TODO: Finish writing schema
+        insertion: Option<String>,
+        click_event: Option<ChatClickEvent>,
+        hover_event: Option<ChatHoverEvent>,
     }
+
+    pub struct chat_click_event::ChatClickEvent(JsonSchema) {
+        action: String,
+        value: String,
+    }
+
+    pub struct chat_hover_event::ChatHoverEvent(JsonSchema) {
+        show_text: Option<String>,
+        show_item: Option<ChatShownItem>,
+        show_entity: Option<String>,
+    }
+
+
+    pub struct chat_shown_item::ChatShownItem(JsonSchema) {
+        id: String,
+        count: u8,
+        tag: Option<String>,
+}
 }
 
 impl MineProtoJsonValue for ChatComponent {
     const MAX_LEN: u32 = 262144;
+}
+
+// === Containers === //
+
+// TrailingByteArray
+#[derive(Debug, Clone)]
+pub struct TrailingByteArray(pub Bytes);
+
+impl DeserializeSeq<MineCodec> for TrailingByteArray {
+    type Summary = ();
+    type View<'a> = &'a [u8];
+
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        Self(Bytes::from(Vec::from(*view)))
+    }
+}
+
+impl DeserializeSeqForSimple<MineCodec, ()> for TrailingByteArray {
+    fn decode_simple<'a>(
+        _bind: [&'a (); 0],
+        cursor: &mut ByteCursor<'a>,
+        _args: &mut (),
+    ) -> anyhow::Result<Self::View<'a>> {
+        let remaining = cursor.remaining();
+        cursor.advance_remaining();
+        Ok(remaining)
+    }
+}
+
+impl SerializeInto<MineCodec, TrailingByteArray, ()> for TrailingByteArray {
+    fn serialize(
+        &mut self,
+        stream: &mut impl WriteStreamFor<MineCodec>,
+        _args: &mut (),
+    ) -> anyhow::Result<()> {
+        stream.push(&self.0)?;
+        Ok(())
+    }
+}
+
+impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
+    fn serialize(
+        &mut self,
+        stream: &mut impl WriteStreamFor<MineCodec>,
+        _args: &mut (),
+    ) -> anyhow::Result<()> {
+        stream.push(self)?;
+        Ok(())
+    }
 }

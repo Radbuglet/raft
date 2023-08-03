@@ -1,6 +1,7 @@
 use std::{fmt, marker::PhantomData, ops::Deref};
 
 use derive_where::derive_where;
+use either::Either;
 use hashbrown::HashMap;
 use justjson::parser::{JsonKind, ParseDelegate, Parser};
 
@@ -118,6 +119,34 @@ pub enum JsonNumber {
     F64(f64),
     U64(u64),
     I64(i64),
+}
+
+impl JsonNumber {
+    pub fn as_uint(self) -> anyhow::Result<u64> {
+        match self {
+            // TODO: Check this logic
+            JsonNumber::F64(v) => Ok(v as u64),
+            JsonNumber::U64(v) => Ok(v),
+            JsonNumber::I64(v) => Ok(u64::try_from(v)?),
+        }
+    }
+
+    pub fn as_int(self) -> anyhow::Result<i64> {
+        match self {
+            // TODO: Check this logic
+            JsonNumber::F64(v) => Ok(v as i64),
+            JsonNumber::U64(v) => Ok(i64::try_from(v)?),
+            JsonNumber::I64(v) => Ok(v),
+        }
+    }
+
+    pub fn as_float(self) -> anyhow::Result<f64> {
+        match self {
+            JsonNumber::F64(v) => Ok(v),
+            JsonNumber::U64(v) => Ok(v as f64),
+            JsonNumber::I64(v) => Ok(v as f64),
+        }
+    }
 }
 
 // === JsonDocument Views === //
@@ -436,9 +465,9 @@ impl<V: SchemaView<JsonSchema, ()>> SchemaView<JsonSchema, ()> for Option<V> {
         self.as_ref().map(|v| v.as_shortcut())
     }
 
-    fn reify(&self) -> anyhow::Result<Self::Reified> {
+    fn try_reify(&self) -> anyhow::Result<Self::Reified> {
         if let Some(inner) = self {
-            Ok(Some(inner.reify()?))
+            Ok(Some(inner.try_reify()?))
         } else {
             Ok(None)
         }
@@ -458,8 +487,8 @@ impl<V: ValidatedSchemaView<JsonSchema, ()>> ValidatedSchemaView<JsonSchema, ()>
         self.as_ref().map(|v| v.as_shortcut_validated())
     }
 
-    fn reify_validated(&self) -> Self::Reified {
-        self.as_ref().map(|v| v.reify_validated())
+    fn reify(&self) -> Self::Reified {
+        self.as_ref().map(|v| v.reify())
     }
 }
 
@@ -554,10 +583,10 @@ where
         self.view.handle
     }
 
-    fn reify(&self) -> anyhow::Result<Self::Reified> {
+    fn try_reify(&self) -> anyhow::Result<Self::Reified> {
         let mut out = Vec::<T>::with_capacity(self.len() as usize);
         for elem in self.iter() {
-            out.push(elem?.reify()?);
+            out.push(elem?.try_reify()?);
         }
         Ok(out)
     }
@@ -600,13 +629,83 @@ where
         self.0.as_shortcut()
     }
 
-    fn reify_validated(&self) -> Self::Reified {
-        self.0.reify().unwrap()
+    fn reify(&self) -> Self::Reified {
+        self.0.try_reify().unwrap()
     }
 }
 
 // Number
-// TODO
+macro_rules! impl_numerics {
+    ($converter:ident; $($ty:ty),*$(,)?) => {$(
+        impl DeserializeSchema<JsonSchema, ()> for $ty {
+            type Shortcut = $ty;
+            type View<'a> = $ty;
+            type ValidatedView<'a> = $ty;
+
+            fn make_shortcut(
+                _document: &JsonDocument,
+                object: Option<JsonValue>,
+            ) -> anyhow::Result<Self::Shortcut> {
+                match object {
+                    Some(JsonValue::Number(number)) => Ok(<$ty>::try_from(number.$converter()?)?),
+                    value @ _ => anyhow::bail!("Expected number, got {value:?}"),
+                }
+            }
+
+            fn view_shortcut<'a>(
+                _document: &'a <JsonSchema as SchemaDecodeCodec>::Document,
+                shortcut: Self::Shortcut,
+                _args: (),
+            ) -> Self::View<'a> {
+                shortcut
+            }
+        }
+
+        impl SchemaView<JsonSchema, ()> for $ty {
+            type Reified = $ty;
+            type Shortcut = $ty;
+            type Validated = $ty;
+
+            fn assume_valid(self) -> Self::Validated {
+                self
+            }
+
+            fn validate_deep(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn as_shortcut(&self) -> Self::Shortcut {
+                *self
+            }
+
+            fn try_reify(&self) -> anyhow::Result<Self::Reified> {
+                Ok(*self)
+            }
+        }
+
+        impl ValidatedSchemaView<JsonSchema, ()> for $ty {
+            type Reified = $ty;
+            type Shortcut = $ty;
+            type RawView = $ty;
+
+            fn unwrap_validation(self) -> Self::RawView {
+                self
+            }
+
+            fn as_shortcut_validated(&self) -> Self::Shortcut {
+                *self
+            }
+
+            fn reify(&self) -> Self::Reified {
+                *self
+            }
+        }
+    )*};
+}
+
+impl_numerics!(as_uint; u8, u16, u32, u64);
+impl_numerics!(as_int; i8, i16, i32, i64);
+impl_numerics!(as_float; f64);
 
 // Boolean
 impl DeserializeSchema<JsonSchema, ()> for bool {
@@ -650,7 +749,7 @@ impl SchemaView<JsonSchema, ()> for bool {
         *self
     }
 
-    fn reify(&self) -> anyhow::Result<Self::Reified> {
+    fn try_reify(&self) -> anyhow::Result<Self::Reified> {
         Ok(*self)
     }
 }
@@ -668,7 +767,7 @@ impl ValidatedSchemaView<JsonSchema, ()> for bool {
         *self
     }
 
-    fn reify_validated(&self) -> Self::Reified {
+    fn reify(&self) -> Self::Reified {
         *self
     }
 }
@@ -724,7 +823,7 @@ impl SchemaView<JsonSchema, ()> for StringView<'_> {
         self.intern
     }
 
-    fn reify(&self) -> anyhow::Result<Self::Reified> {
+    fn try_reify(&self) -> anyhow::Result<Self::Reified> {
         Ok(self.text.to_string())
     }
 }
@@ -742,7 +841,7 @@ impl ValidatedSchemaView<JsonSchema, ()> for StringView<'_> {
         self.intern
     }
 
-    fn reify_validated(&self) -> Self::Reified {
+    fn reify(&self) -> Self::Reified {
         self.text.to_string()
     }
 }
@@ -752,5 +851,105 @@ impl Deref for StringView<'_> {
 
     fn deref(&self) -> &Self::Target {
         self.text
+    }
+}
+
+// === Schema Utilities === //
+
+impl<L, R> DeserializeSchema<JsonSchema, ()> for Either<L, R>
+where
+    L: DeserializeSchema<JsonSchema, ()>,
+    R: DeserializeSchema<JsonSchema, ()>,
+{
+    type Shortcut = Either<L::Shortcut, R::Shortcut>;
+    type View<'a> = Either<L::View<'a>, R::View<'a>>;
+    type ValidatedView<'a> = Either<L::ValidatedView<'a>, R::ValidatedView<'a>>;
+
+    fn make_shortcut(
+        document: &JsonDocument,
+        object: Option<JsonValue>,
+    ) -> anyhow::Result<Self::Shortcut> {
+        let err_left = match L::make_shortcut(document, object) {
+            Ok(shortcut) => return Ok(Either::Left(shortcut)),
+            Err(err) => err,
+        };
+
+        let err_right = match R::make_shortcut(document, object) {
+            Ok(shortcut) => return Ok(Either::Right(shortcut)),
+            Err(err) => err,
+        };
+
+        anyhow::bail!("Failed to parse either left or right. Left error: {err_left:#?}. Right error: {err_right:#?}");
+    }
+
+    fn view_shortcut<'a>(
+        document: &'a JsonDocument,
+        shortcut: Self::Shortcut,
+        _args: (),
+    ) -> Self::View<'a> {
+        match shortcut {
+            Either::Left(left) => Either::Left(L::view_shortcut(document, left, ())),
+            Either::Right(right) => Either::Right(R::view_shortcut(document, right, ())),
+        }
+    }
+}
+
+impl<L, R> SchemaView<JsonSchema, ()> for Either<L, R>
+where
+    L: SchemaView<JsonSchema, ()>,
+    R: SchemaView<JsonSchema, ()>,
+{
+    type Reified = Either<L::Reified, R::Reified>;
+    type Shortcut = Either<L::Shortcut, R::Shortcut>;
+    type Validated = Either<L::Validated, R::Validated>;
+
+    fn assume_valid(self) -> Self::Validated {
+        self.map_either(SchemaView::assume_valid, SchemaView::assume_valid)
+    }
+
+    fn validate_deep(&self) -> anyhow::Result<()> {
+        self.as_ref()
+            .either(SchemaView::validate_deep, SchemaView::validate_deep)
+    }
+
+    fn as_shortcut(&self) -> Self::Shortcut {
+        self.as_ref()
+            .map_either(SchemaView::as_shortcut, SchemaView::as_shortcut)
+    }
+
+    fn try_reify(&self) -> anyhow::Result<Self::Reified> {
+        match self {
+            Either::Left(left) => Ok(Either::Left(left.try_reify()?)),
+            Either::Right(right) => Ok(Either::Right(right.try_reify()?)),
+        }
+    }
+}
+
+impl<L, R> ValidatedSchemaView<JsonSchema, ()> for Either<L, R>
+where
+    L: ValidatedSchemaView<JsonSchema, ()>,
+    R: ValidatedSchemaView<JsonSchema, ()>,
+{
+    type Reified = Either<L::Reified, R::Reified>;
+    type Shortcut = Either<L::Shortcut, R::Shortcut>;
+    type RawView = Either<L::RawView, R::RawView>;
+
+    fn unwrap_validation(self) -> Self::RawView {
+        self.map_either(
+            ValidatedSchemaView::unwrap_validation,
+            ValidatedSchemaView::unwrap_validation,
+        )
+    }
+
+    fn as_shortcut_validated(&self) -> Self::Shortcut {
+        self.as_ref().map_either(
+            ValidatedSchemaView::as_shortcut_validated,
+            ValidatedSchemaView::as_shortcut_validated,
+        )
+    }
+
+    fn reify(&self) -> Self::Reified {
+        self.as_ref()
+            .map_either(ValidatedSchemaView::reify, ValidatedSchemaView::reify)
     }
 }

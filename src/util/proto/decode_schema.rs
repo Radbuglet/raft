@@ -79,7 +79,7 @@ pub trait SchemaView<C: SchemaDecodeCodec, A>: fmt::Debug + Clone {
 
     fn as_shortcut(&self) -> Self::Shortcut;
 
-    fn reify(&self) -> anyhow::Result<Self::Reified>;
+    fn try_reify(&self) -> anyhow::Result<Self::Reified>;
 }
 
 pub trait ValidatedSchemaView<C: SchemaDecodeCodec, A>: fmt::Debug + Clone {
@@ -97,7 +97,7 @@ pub trait ValidatedSchemaView<C: SchemaDecodeCodec, A>: fmt::Debug + Clone {
 
     fn as_shortcut_validated(&self) -> Self::Shortcut;
 
-    fn reify_validated(&self) -> Self::Reified;
+    fn reify(&self) -> Self::Reified;
 }
 
 // === Derivation Macro === //
@@ -182,10 +182,10 @@ macro_rules! derive_schema_decode {
 				self.shortcut
 			}
 
-			fn reify(&self) -> $crate::util::proto::decode_schema::derive_schema_decode_internals::anyhow::Result<Self::Reified> {
+			fn try_reify(&self) -> $crate::util::proto::decode_schema::derive_schema_decode_internals::anyhow::Result<Self::Reified> {
 				$crate::util::proto::decode_schema::derive_schema_decode_internals::anyhow::Result::Ok(Self::Reified {
 					$(
-						$field_name: $crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ($($config_ty)?)>::reify(
+						$field_name: $crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ($($config_ty)?)>::try_reify(
 							&self.$field_name()?,
 						)?,
 					)*
@@ -249,8 +249,8 @@ macro_rules! derive_schema_decode {
 				$crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ()>::as_shortcut(&self.0)
 			}
 
-			fn reify_validated(&self) -> Self::Reified {
-				$crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ()>::reify(&self.0).unwrap()
+			fn reify(&self) -> Self::Reified {
+				$crate::util::proto::decode_schema::derive_schema_decode_internals::SchemaView::<$codec, ()>::try_reify(&self.0).unwrap()
 			}
 		}
 

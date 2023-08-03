@@ -52,6 +52,8 @@ macro_rules! seq_codec_struct {
 				}
 			}
 		}
+
+		$struct_vis use $mod_name::$struct_name;
 	)*};
 }
 
@@ -97,6 +99,8 @@ macro_rules! schema_codec_struct {
 				}
 			}
 		}
+
+		$struct_vis use $mod_name::$struct_name;
 	)*};
 }
 
