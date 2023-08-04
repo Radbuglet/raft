@@ -76,7 +76,11 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
         args: &mut A,
     ) -> Self::View<'a>;
 
-    /// Skips a cursor starting at the beginning of the stream to the start of the next element.
+    /// Skips a cursor starting from some indeterminate beginning to the start of the next element.
+    ///
+    /// The `skip_to_start` closure can be used to normalize the cursor position to the start of the
+    /// actual current item assuming it started at the same starting point as it did at the beginning
+    /// of the method call.
     fn skip(
         summary: &Self::Summary,
         skip_to_start: impl Fn(&mut C::Reader<'_>),
@@ -277,7 +281,7 @@ pub mod derive_seq_decode_internals {
     pub use {
         super::{DeserializeSeq, DeserializeSeqFor, ReadCursor, SeqDecodeCodec},
         anyhow,
-        std::{clone::Clone, convert::identity, fmt, result::Result::Ok, stringify},
+        std::{clone::Clone, convert::identity, fmt, ops::Fn, result::Result::Ok, stringify},
     };
 }
 
@@ -349,7 +353,9 @@ macro_rules! derive_seq_decode {
 
 			fn skip(
 				summary: &Self::Summary,
-				skip_to_start: impl Fn(&mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>),
+				skip_to_start: impl $crate::util::proto::decode_seq::derive_seq_decode_internals::Fn(
+					&mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>,
+				),
 				cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>,
 				_args: &mut (),
 			) {
@@ -372,9 +378,11 @@ macro_rules! derive_seq_decode {
 		}
 
 		// View accessors
-		mod skippers {
+		mod __skip_past {
+			#[allow(unused_imports)]
 			use super::*;
 
+			#[allow(unused_macros)]
 			macro_rules! prev_func_call {
 				($cursor:expr, $summary:expr) => {
 					let _ = $cursor;
@@ -405,12 +413,40 @@ macro_rules! derive_seq_decode {
 			)*
 		}
 
+		mod __skip_to {
+			#[allow(unused_imports)]
+			use super::*;
+
+			#[allow(unused_macros)]
+			macro_rules! prev_func_def {
+				($export_name:ident) => {
+					pub fn $export_name(
+						_cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>,
+						_summary: &Summary,
+					) {
+						// (nothing to do for the first field)
+					}
+				};
+			}
+
+			$(
+				prev_func_def!($field_name);
+
+				#[allow(unused_macros)]
+				macro_rules! prev_func_def {
+					($export_name:ident) => {
+						pub use __skip_past::$field_name as $export_name;
+					};
+				}
+			)*
+		}
+
 		impl<'a> View<'a> {
 			$(
 				pub fn $field_name(&self) -> <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec>>::View<'a> {
 					// Align the cursor to the appropriate location.
 					let mut cursor = $crate::util::proto::decode_seq::derive_seq_decode_internals::Clone::clone(&self.cursor);
-					skippers::$field_name(&mut cursor, &self.summary);
+					__skip_to::$field_name(&mut cursor, &self.summary);
 
 					// Compute the config outside of the `unsafe` block.
 					let mut config = {$($config)?};

@@ -13,7 +13,7 @@ use crate::util::{
             DeserializeSeq, DeserializeSeqFor, DeserializeSeqForSimple, EndPosSummary,
             SeqDecodeCodec,
         },
-        encode::{EncodeCodec, SerializeInto, WriteStreamFor},
+        encode::{EncodeCodec, SerializeFrom, SerializeInto, WriteStreamFor},
         json_document::{JsonDocument, JsonSchema},
     },
     var_int::{decode_var_i32_streaming, encode_var_u32},
@@ -31,7 +31,7 @@ impl SeqDecodeCodec for MineCodec {
     type Reader<'a> = ByteCursor<'a>;
     type ReaderPos = usize;
 
-    fn covariant_cast<'a: 'b, 'b>(reader: Self::Reader<'a>) -> Self::Reader<'b> {
+    fn covariant_cast<'a: 'b, 'b>(reader: ByteCursor<'a>) -> ByteCursor<'b> {
         reader
     }
 }
@@ -585,3 +585,107 @@ impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
         Ok(())
     }
 }
+
+// Option
+impl<T> DeserializeSeq<MineCodec> for Option<T>
+where
+    T: DeserializeSeq<MineCodec>,
+{
+    type Summary = (Option<T::Summary>, usize);
+    type View<'a> = Option<T::View<'a>>;
+
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        view.as_ref().map(|view| T::reify_view(view))
+    }
+}
+
+impl<T, A> DeserializeSeqFor<MineCodec, (A,)> for Option<T>
+where
+    T: DeserializeSeqFor<MineCodec, A>,
+{
+    fn summarize(cursor: &mut ByteCursor, args: &mut (A,)) -> anyhow::Result<Self::Summary> {
+        if bool::decode(cursor, &mut ())? {
+            Ok((Some(T::summarize(cursor, &mut args.0)?), cursor.pos()))
+        } else {
+            Ok((None, cursor.pos()))
+        }
+    }
+
+    unsafe fn view<'a>(
+        summary: &'a Self::Summary,
+        mut cursor: ByteCursor<'a>,
+        args: &mut (A,),
+    ) -> Self::View<'a> {
+        // Skip the boolean field
+        cursor.advance(1);
+
+        // Produce the view
+        summary
+            .0
+            .as_ref()
+            .map(|summary| T::view(summary, cursor, &mut args.0))
+    }
+
+    fn skip(
+        summary: &Self::Summary,
+        _skip_to_start: impl Fn(&mut ByteCursor),
+        cursor: &mut ByteCursor,
+        _args: &mut (A,),
+    ) {
+        cursor.set_pos(summary.1);
+    }
+}
+
+impl<T> DeserializeSeqFor<MineCodec, ()> for Option<T>
+where
+    T: DeserializeSeqFor<MineCodec, ()>,
+{
+    fn summarize(cursor: &mut ByteCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
+        <Option<T> as DeserializeSeqFor<MineCodec, ((),)>>::summarize(cursor, &mut ((),))
+    }
+
+    unsafe fn view<'a>(
+        summary: &'a Self::Summary,
+        cursor: ByteCursor<'a>,
+        _args: &mut (),
+    ) -> Self::View<'a> {
+        <Option<T> as DeserializeSeqFor<MineCodec, ((),)>>::view(summary, cursor, &mut ((),))
+    }
+
+    fn skip(
+        summary: &Self::Summary,
+        skip_to_start: impl Fn(&mut ByteCursor),
+        cursor: &mut ByteCursor,
+        _args: &mut (),
+    ) {
+        <Option<T> as DeserializeSeqFor<MineCodec, ((),)>>::skip(
+            summary,
+            skip_to_start,
+            cursor,
+            &mut ((),),
+        )
+    }
+}
+
+impl<T, V, A> SerializeInto<MineCodec, Option<T>, A> for Option<V>
+where
+    V: SerializeInto<MineCodec, T, A>,
+{
+    fn serialize(
+        &mut self,
+        stream: &mut impl WriteStreamFor<MineCodec>,
+        args: &mut A,
+    ) -> anyhow::Result<()> {
+        if let Some(inner) = self {
+            bool::serialize_from(&mut true, stream, &mut ())?;
+            T::serialize_from(inner, stream, args)?;
+            Ok(())
+        } else {
+            bool::serialize_from(&mut false, stream, &mut ())?;
+            Ok(())
+        }
+    }
+}
+
+// Vec
+// TODO
