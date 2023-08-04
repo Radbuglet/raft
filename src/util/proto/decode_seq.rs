@@ -19,13 +19,13 @@ pub trait ReadCursor: Sized + Clone {
     fn set_pos(&mut self, pos: Self::Pos);
 }
 
-pub trait ReadPos: Sized + 'static + Copy + Eq {}
+pub trait ReadPos: Sized + 'static + fmt::Debug + Copy + Eq {}
 
-impl<T: 'static + Copy + Eq> ReadPos for T {}
+impl<T: 'static + fmt::Debug + Copy + Eq> ReadPos for T {}
 
 // === Deserialize === //
 
-pub trait DeserializeSeq<C: SeqDecodeCodec>: Sized + 'static {
+pub trait DeserializeSeq<C: SeqDecodeCodec, A>: Sized + 'static {
     /// A summary of the deserialized contents. This includes enough information to:
     ///
     /// 1. Determine the position of sub-fields quickly given the starting position of the object.
@@ -43,9 +43,7 @@ pub trait DeserializeSeq<C: SeqDecodeCodec>: Sized + 'static {
 
     /// Reifies a view object into an owned version of that object.
     fn reify_view(view: &Self::View<'_>) -> Self;
-}
 
-pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
     /// Validates and summarizes an input stream, leaving the `cursor` head at the start of
     /// the next item.
     fn summarize(cursor: &mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self::Summary>;
@@ -73,7 +71,7 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
     unsafe fn view<'a>(
         summary: &'a Self::Summary,
         cursor: C::Reader<'a>,
-        args: &mut A,
+        args: A,
     ) -> Self::View<'a>;
 
     /// Skips a cursor starting from some indeterminate beginning to the start of the next element.
@@ -89,12 +87,12 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
     );
 
     /// Summarizes and views the deserialized contents of the reader in a single step.
-    fn summarize_and_view<F, R>(cursor: &mut C::Reader<'_>, args: &mut A, f: F) -> anyhow::Result<R>
+    fn summarize_and_view<F, R>(cursor: &mut C::Reader<'_>, mut args: A, f: F) -> anyhow::Result<R>
     where
         F: FnOnce(&mut C::Reader<'_>, Self::View<'_>) -> anyhow::Result<R>,
     {
         let fork = cursor.clone();
-        let summary = Self::summarize(cursor, args)?;
+        let summary = Self::summarize(cursor, &mut args)?;
 
         let view = unsafe {
             // Safety: we just generated this summary with the appropriate cursor.
@@ -105,14 +103,19 @@ pub trait DeserializeSeqFor<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
     }
 
     /// Decodes the reified version of this value in a single step.
-    fn decode<'a>(cursor: &'a mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self> {
+    fn decode<'a>(cursor: &'a mut C::Reader<'_>, args: A) -> anyhow::Result<Self> {
         Self::summarize_and_view(cursor, args, |_, view| Ok(Self::reify_view(&view)))
     }
 }
 
 // === DeserializeSeqForSimple === //
 
-pub trait DeserializeSeqForSimple<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
+pub trait DeserializeSeqSimple<C: SeqDecodeCodec, A>: Sized + 'static {
+    type SimpleSummary: SimpleSummary<C>;
+    type SimpleView<'a>: fmt::Debug + Clone;
+
+    fn reify_view_simple(view: &Self::SimpleView<'_>) -> Self;
+
     // N.B. The Rust trait checker differentiates between methods which are made early-bound and
     // methods which are made late-bound when converted into a closure and currently refuses to unify
     // the former into the latter during trait member compatibility checks.
@@ -192,7 +195,7 @@ pub trait DeserializeSeqForSimple<C: SeqDecodeCodec, A>: DeserializeSeq<C> {
         _binding: [&'a (); 0],
         cursor: &mut C::Reader<'a>,
         args: &mut A,
-    ) -> anyhow::Result<Self::View<'a>>;
+    ) -> anyhow::Result<Self::SimpleView<'a>>;
 }
 
 pub trait SimpleSummary<C: SeqDecodeCodec>: ReadPos {
@@ -204,7 +207,7 @@ pub trait SimpleSummary<C: SeqDecodeCodec>: ReadPos {
         cursor: &mut C::Reader<'_>,
         args: &mut A,
     ) where
-        T: DeserializeSeqForSimple<C, A>;
+        T: DeserializeSeqSimple<C, A>;
 }
 
 impl<C: SeqDecodeCodec> SimpleSummary<C> for () {
@@ -218,7 +221,7 @@ impl<C: SeqDecodeCodec> SimpleSummary<C> for () {
         cursor: &mut C::Reader<'_>,
         args: &mut A,
     ) where
-        T: DeserializeSeqForSimple<C, A>,
+        T: DeserializeSeqSimple<C, A>,
     {
         skip_to_start(cursor);
         let _ = T::decode_simple([], cursor, args);
@@ -239,18 +242,24 @@ impl<C: SeqDecodeCodec> SimpleSummary<C> for EndPosSummary<C::ReaderPos> {
         cursor: &mut C::Reader<'_>,
         _args: &mut A,
     ) where
-        T: DeserializeSeqForSimple<C, A>,
+        T: DeserializeSeqSimple<C, A>,
     {
         cursor.set_pos(self.0);
     }
 }
 
-impl<C, A, T> DeserializeSeqFor<C, A> for T
+impl<C, A, T> DeserializeSeq<C, A> for T
 where
     C: SeqDecodeCodec,
-    T: DeserializeSeqForSimple<C, A>,
-    T::Summary: SimpleSummary<C>,
+    T: DeserializeSeqSimple<C, A>,
 {
+    type Summary = T::SimpleSummary;
+    type View<'a> = T::SimpleView<'a>;
+
+    fn reify_view(view: &Self::View<'_>) -> Self {
+        Self::reify_view_simple(view)
+    }
+
     fn summarize(cursor: &mut C::Reader<'_>, args: &mut A) -> anyhow::Result<Self::Summary> {
         Self::decode_simple([], cursor, args)?;
         Ok(SimpleSummary::from_pos(cursor.pos()))
@@ -259,9 +268,9 @@ where
     unsafe fn view<'a>(
         _summary: &'a Self::Summary,
         cursor: C::Reader<'a>,
-        args: &mut A,
+        mut args: A,
     ) -> Self::View<'a> {
-        Self::decode_simple([], &mut cursor.clone(), args).unwrap()
+        Self::decode_simple([], &mut cursor.clone(), &mut args).unwrap()
     }
 
     fn skip(
@@ -279,7 +288,7 @@ where
 #[doc(hidden)]
 pub mod derive_seq_decode_internals {
     pub use {
-        super::{DeserializeSeq, DeserializeSeqFor, ReadCursor, SeqDecodeCodec},
+        super::{DeserializeSeq, ReadCursor, SeqDecodeCodec},
         anyhow,
         std::{clone::Clone, convert::identity, fmt, ops::Fn, result::Result::Ok, stringify},
     };
@@ -299,7 +308,7 @@ macro_rules! derive_seq_decode {
 		// Structure definitions
 		#[derive(Debug, Clone)]
 		pub struct Summary {
-			$($field_name: <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec>>::Summary,)*
+			$($field_name: <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec, ($($config_ty)?)>>::Summary,)*
 		}
 
 		#[derive(Clone)]
@@ -310,7 +319,7 @@ macro_rules! derive_seq_decode {
 		}
 
 		// Deserialization
-		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec> for $struct_name {
+		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec, ()> for $struct_name {
 			type Summary = Summary;
 			type View<'a> = View<'a>;
 
@@ -321,9 +330,7 @@ macro_rules! derive_seq_decode {
 					$($field_name: $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq::<$codec>::reify_view(&view.$field_name()),)*
 				}
 			}
-		}
 
-		impl $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ()> for $struct_name {
 			fn summarize(
 				cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>,
 				_args: &mut (),
@@ -364,7 +371,7 @@ macro_rules! derive_seq_decode {
 				$(
 					#[allow(unused_parens)]
 					let skip_to_start = |cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>| {
-						<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::skip(
+						<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec, ($($config_ty)?)>>::skip(
 							&summary.$field_name,
 							&skip_to_start,
 							cursor,
@@ -394,7 +401,7 @@ macro_rules! derive_seq_decode {
 					cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>,
 					summary: &Summary,
 				) {
-					<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::skip(
+					<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec, ($($config_ty)?)>>::skip(
 						&summary.$field_name,
 						|cursor: &mut <$codec as $crate::util::proto::decode_seq::derive_seq_decode_internals::SeqDecodeCodec>::Reader<'_>| {
 							prev_func_call!(cursor, summary);
@@ -443,7 +450,7 @@ macro_rules! derive_seq_decode {
 
 		impl<'a> View<'a> {
 			$(
-				pub fn $field_name(&self) -> <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec>>::View<'a> {
+				pub fn $field_name(&self) -> <$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec, ($($config_ty)?)>>::View<'a> {
 					// Align the cursor to the appropriate location.
 					let mut cursor = $crate::util::proto::decode_seq::derive_seq_decode_internals::Clone::clone(&self.cursor);
 					__skip_to::$field_name(&mut cursor, &self.summary);
@@ -457,7 +464,7 @@ macro_rules! derive_seq_decode {
 						// valid. We know the config type is constant because `$config_ty` fixes it
 						// to a value.
 						#[allow(unused_parens)]
-						<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeqFor<$codec, ($($config_ty)?)>>::view(
+						<$field_ty as $crate::util::proto::decode_seq::derive_seq_decode_internals::DeserializeSeq<$codec, ($($config_ty)?)>>::view(
 							&self.summary.$field_name,
 							cursor,
 							&mut config,
