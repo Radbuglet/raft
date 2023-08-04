@@ -9,7 +9,10 @@ use crate::util::{
         byte_stream::{ByteCursor, ByteSize, ByteWriteStream, WriteCodepointCounter},
         core::{schema_codec_struct, Codec},
         decode_schema::{DeserializeSchema, SchemaView, ValidatedSchemaView},
-        decode_seq::{DeserializeSeq, DeserializeSeqSimple, EndPosSummary, SeqDecodeCodec},
+        decode_seq::{
+            ArgForwardToFullAdapter, DecodeSeq, DecodeSeqExt, EndPosSummary, SeqDecodeCodec,
+            SeqDecoderArgForward, SeqDecoderFull, SeqDecoderSimple, SimpleToFullAdapter,
+        },
         encode::{EncodeCodec, SerializeFrom, SerializeInto, WriteStreamFor},
         json_document::{JsonDocument, JsonSchema},
     },
@@ -38,24 +41,36 @@ impl EncodeCodec for MineCodec {
     type SizeMetric = ByteSize;
 }
 
+mod sealed {
+    pub struct OurDecoders {
+        _never: (),
+    }
+}
+
+use sealed::OurDecoders;
+
 // === Numerics === //
 
 // Primitives
 macro_rules! impl_numerics {
 	($($ty:ty),*$(,)?) => {$(
-		impl DeserializeSeqSimple<MineCodec, ()> for $ty {
-			type SimpleSummary = ();
-			type SimpleView<'a> = Self;
+		impl DecodeSeq<MineCodec, ()> for $ty {
+			type Decoder = SimpleToFullAdapter<OurDecoders>;
+		}
 
-			fn reify_view_simple(view: &Self::SimpleView<'_>) -> Self {
+		impl SeqDecoderSimple<$ty, MineCodec, ()> for OurDecoders {
+			type Summary = ();
+			type View<'a> = $ty;
+
+			fn reify_view(view: &Self::View<'_>) -> $ty {
 				*view
 			}
 
-			fn decode_simple<'a>(
+			fn decode<'a>(
 				_bind: [&'a (); 0],
 				cursor: &mut ByteCursor<'a>,
 				_args: &mut (),
-			) -> anyhow::Result<Self::SimpleView<'a>> {
+			) -> anyhow::Result<Self::View<'a>> {
 				let arr = cursor.read_arr()
 					.ok_or_else(|| anyhow::anyhow!(
 						"Unexpected end-of-stream while reading {}: expected {} byte(s), got {} \
@@ -66,7 +81,7 @@ macro_rules! impl_numerics {
 						cursor.format_location(),
 					))?;
 
-				Ok(Self::from_be_bytes(arr))
+				Ok(<$ty>::from_be_bytes(arr))
 			}
 		}
 
@@ -81,20 +96,24 @@ macro_rules! impl_numerics {
 
 impl_numerics!(i8, u8, i16, u16, i32, u32, i64, f32, f64, u128);
 
-impl DeserializeSeqSimple<MineCodec, ()> for bool {
-    type SimpleSummary = ();
-    type SimpleView<'a> = Self;
+impl DecodeSeq<MineCodec, ()> for bool {
+    type Decoder = SimpleToFullAdapter<OurDecoders>;
+}
 
-    fn reify_view_simple(view: &Self::SimpleView<'_>) -> Self {
+impl SeqDecoderSimple<bool, MineCodec, ()> for OurDecoders {
+    type Summary = ();
+    type View<'a> = bool;
+
+    fn reify_view(view: &Self::View<'_>) -> bool {
         *view
     }
 
-    fn decode_simple<'a>(
+    fn decode<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
         _args: &mut (),
-    ) -> anyhow::Result<Self::SimpleView<'a>> {
-        let byte = u8::decode_simple([], cursor, &mut ())?;
+    ) -> anyhow::Result<Self::View<'a>> {
+        let byte = u8::decode(cursor, ())?;
         match byte {
             0 => Ok(false),
             1 => Ok(true),
@@ -120,19 +139,23 @@ impl SerializeInto<MineCodec, bool, ()> for bool {
 #[derive(Debug, Copy, Clone)]
 pub struct VarInt(pub i32);
 
-impl DeserializeSeqSimple<MineCodec, ()> for VarInt {
-    type SimpleSummary = EndPosSummary<usize>;
-    type SimpleView<'a> = i32;
+impl DecodeSeq<MineCodec, ()> for VarInt {
+    type Decoder = SimpleToFullAdapter<OurDecoders>;
+}
 
-    fn reify_view_simple(view: &Self::SimpleView<'_>) -> Self {
-        Self(*view)
+impl SeqDecoderSimple<VarInt, MineCodec, ()> for OurDecoders {
+    type Summary = EndPosSummary<usize>;
+    type View<'a> = i32;
+
+    fn reify_view(view: &Self::View<'_>) -> VarInt {
+        VarInt(*view)
     }
 
-    fn decode_simple<'a>(
+    fn decode<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
         _args: &mut (),
-    ) -> anyhow::Result<Self::SimpleView<'a>> {
+    ) -> anyhow::Result<Self::View<'a>> {
         decode_var_i32_streaming(cursor)?
             .ok_or_else(|| anyhow::anyhow!("Unterminated VarInt (location: {})", cursor.pos()))
     }
@@ -163,20 +186,24 @@ impl SerializeInto<MineCodec, VarInt, ()> for i32 {
 #[derive(Debug, Copy, Clone)]
 pub struct VarUint(pub u32);
 
-impl DeserializeSeqSimple<MineCodec, ()> for VarUint {
-    type SimpleSummary = EndPosSummary<usize>;
-    type SimpleView<'a> = u32;
+impl DecodeSeq<MineCodec, ()> for VarUint {
+    type Decoder = SimpleToFullAdapter<OurDecoders>;
+}
 
-    fn reify_view_simple(view: &Self::SimpleView<'_>) -> Self {
-        Self(*view)
+impl SeqDecoderSimple<VarUint, MineCodec, ()> for OurDecoders {
+    type Summary = EndPosSummary<usize>;
+    type View<'a> = u32;
+
+    fn reify_view(view: &Self::View<'_>) -> VarUint {
+        VarUint(*view)
     }
 
-    fn decode_simple<'a>(
+    fn decode<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
         _args: &mut (),
-    ) -> anyhow::Result<Self::SimpleView<'a>> {
-        let value = VarInt::decode_simple([], cursor, &mut ())?;
+    ) -> anyhow::Result<Self::View<'a>> {
+        let value = VarInt::decode(cursor, ())?.0;
         u32::try_from(value).map_err(|_| {
             anyhow::anyhow!(
                 "Unexpected negative VarUint with value {value} (location: {}).",
@@ -210,11 +237,15 @@ impl SerializeInto<MineCodec, VarUint, ()> for u32 {
 // === Strings === //
 
 // String
-impl DeserializeSeq<MineCodec, Option<u32>> for String {
+impl DecodeSeq<MineCodec, Option<u32>> for String {
+    type Decoder = OurDecoders;
+}
+
+impl SeqDecoderFull<String, MineCodec, Option<u32>> for OurDecoders {
     type Summary = usize;
     type View<'a> = &'a str;
 
-    fn reify_view(view: &Self::View<'_>) -> Self {
+    fn reify_view(view: &Self::View<'_>) -> String {
         String::from(*view)
     }
 
@@ -223,7 +254,7 @@ impl DeserializeSeq<MineCodec, Option<u32>> for String {
         max_len: &mut Option<u32>,
     ) -> anyhow::Result<Self::Summary> {
         let start_pos = cursor.pos();
-        let size = VarUint::decode_simple([], cursor, &mut ())?;
+        let size = VarUint::decode(cursor, ())?.0;
 
         // Validate length
         if let Some(max_len) = *max_len {
@@ -285,7 +316,7 @@ impl DeserializeSeq<MineCodec, Option<u32>> for String {
         _args: Option<u32>,
     ) -> Self::View<'a> {
         let mut cursor = cursor.with_pos(*summary);
-        let size = VarUint::decode_simple([], &mut cursor, &mut ()).unwrap();
+        let size = VarUint::decode(&mut cursor, ()).unwrap().0;
         let data = cursor.read_slice(size as usize).unwrap();
 
         // Safety: `summarize` already validated that parsing from the `*summary` buffer location
@@ -303,7 +334,7 @@ impl DeserializeSeq<MineCodec, Option<u32>> for String {
         debug_assert_eq!(cursor.pos(), *summary);
 
         skip_to_start(cursor);
-        let byte_len = VarInt::decode_simple([], cursor, &mut ()).unwrap();
+        let byte_len = VarInt::decode(cursor, ()).unwrap().0;
         let _ = cursor.read_slice(byte_len as usize);
     }
 }
@@ -339,48 +370,19 @@ impl<T: fmt::Display> SerializeInto<MineCodec, String, Option<u32>> for T {
     }
 }
 
-impl DeserializeSeq<MineCodec, u32> for String {
-    type Summary = <String as DeserializeSeq<MineCodec, Option<u32>>>::Summary;
-    type View<'a> = <String as DeserializeSeq<MineCodec, Option<u32>>>::View<'a>;
-
-    fn reify_view(view: &Self::View<'_>) -> Self {
-        view.to_string()
-    }
-
-    fn summarize(cursor: &mut ByteCursor, args: &mut u32) -> anyhow::Result<Self::Summary> {
-        Self::summarize(cursor, &mut Some(*args))
-    }
-
-    unsafe fn view<'a>(
-        summary: &'a Self::Summary,
-        cursor: ByteCursor<'a>,
-        args: u32,
-    ) -> Self::View<'a> {
-        Self::view(summary, cursor, Some(args))
-    }
-
-    fn skip(
-        summary: &Self::Summary,
-        skip_to_start: impl Fn(&mut ByteCursor),
-        cursor: &mut ByteCursor,
-        args: &mut u32,
-    ) {
-        <String as DeserializeSeq<MineCodec, _>>::skip(
-            summary,
-            skip_to_start,
-            cursor,
-            &mut Some(*args),
-        )
-    }
+impl DecodeSeq<MineCodec, u32> for String {
+    type Decoder = ArgForwardToFullAdapter<OurDecoders>;
 }
 
-impl<T: fmt::Display> SerializeInto<MineCodec, String, u32> for T {
-    fn serialize(
-        &mut self,
-        stream: &mut impl WriteStreamFor<MineCodec>,
-        args: &mut u32,
-    ) -> anyhow::Result<()> {
-        SerializeInto::<MineCodec, String, Option<u32>>::serialize(self, stream, &mut Some(*args))
+impl SeqDecoderArgForward<String, MineCodec, u32> for OurDecoders {
+    type ArgOut = Option<u32>;
+
+    fn map_args(args: u32) -> Self::ArgOut {
+        Some(args)
+    }
+
+    fn map_borrowed_args<R>(args: &mut u32, f: impl FnOnce(&mut Self::ArgOut) -> R) -> R {
+        f(&mut Some(*args))
     }
 }
 
@@ -398,16 +400,16 @@ impl fmt::Display for Identifier {
     }
 }
 
-impl DeserializeSeq<MineCodec, ()> for Identifier {
-    type Summary = <String as DeserializeSeq<MineCodec, Option<u32>>>::Summary;
+impl SeqDecoderFull<Identifier, MineCodec, ()> for OurDecoders {
+    type Summary = <String as DecodeSeqExt<MineCodec, Option<u32>>>::Summary;
     type View<'a> = &'a str;
 
-    fn reify_view(view: &Self::View<'_>) -> Self {
-        Self(String::from(*view))
+    fn reify_view(view: &Self::View<'_>) -> Identifier {
+        Identifier(String::from(*view))
     }
 
     fn summarize(cursor: &mut ByteCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
-        String::summarize(cursor, &mut Some(Self::MAX_LEN))
+        String::summarize(cursor, &mut Some(Identifier::MAX_LEN))
     }
 
     unsafe fn view<'a>(
@@ -415,7 +417,7 @@ impl DeserializeSeq<MineCodec, ()> for Identifier {
         cursor: ByteCursor<'a>,
         _args: (),
     ) -> Self::View<'a> {
-        String::view(summary, cursor, Some(Self::MAX_LEN))
+        String::view(summary, cursor, Some(Identifier::MAX_LEN))
     }
 
     fn skip(
@@ -424,11 +426,11 @@ impl DeserializeSeq<MineCodec, ()> for Identifier {
         cursor: &mut ByteCursor,
         _args: &mut (),
     ) {
-        <String as DeserializeSeq<MineCodec, _>>::skip(
+        <String as DecodeSeqExt<MineCodec, _>>::skip(
             summary,
             skip_to_start,
             cursor,
-            &mut Some(Self::MAX_LEN),
+            &mut Some(Identifier::MAX_LEN),
         )
     }
 }
@@ -449,27 +451,31 @@ impl<T: fmt::Display> SerializeInto<MineCodec, Identifier, ()> for T {
 
 // JSON
 #[derive(Debug, Clone)]
-pub struct Json<T>(pub T);
+pub struct Json<V>(pub V);
 
 pub trait MineProtoJsonValue: DeserializeSchema<JsonSchema, ()> {
     const MAX_LEN: u32;
 }
 
-impl<T: MineProtoJsonValue> DeserializeSeq<MineCodec, ()> for Json<T> {
+impl<V: MineProtoJsonValue> SeqDecoderFull<Json<V>, MineCodec, ()> for OurDecoders {
     type Summary = (JsonDocument, usize);
-    type View<'a> = T::ValidatedView<'a>;
+    type View<'a> = V::ValidatedView<'a>;
 
-    fn reify_view(view: &Self::View<'_>) -> Self {
-        Self(view.reify())
+    fn reify_view(view: &Self::View<'_>) -> Json<V> {
+        Json(view.reify())
     }
 
     fn summarize(cursor: &mut ByteCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
-        String::summarize_and_view(cursor, Some(T::MAX_LEN), |cursor, text| {
-            let document = JsonDocument::parse(text)?;
-            T::view_object(&document, Some(document.root()), ())?.validate_deep()?;
+        // Read the string containing our JSON
+        let mut args = Some(V::MAX_LEN);
+        let summary = String::summarize_bound(cursor, &mut args)?;
+        let text = summary.view(args);
 
-            Ok((document, cursor.pos()))
-        })
+        // Parse and validate the JSON
+        let document = JsonDocument::parse(text)?;
+        V::view_object(&document, Some(document.root()), ())?.validate_deep()?;
+
+        Ok((document, cursor.pos()))
     }
 
     unsafe fn view<'a>(
@@ -477,7 +483,7 @@ impl<T: MineProtoJsonValue> DeserializeSeq<MineCodec, ()> for Json<T> {
         _cursor: ByteCursor<'a>,
         _args: (),
     ) -> Self::View<'a> {
-        T::view_object(&summary.0, Some(summary.0.root()), ())
+        V::view_object(&summary.0, Some(summary.0.root()), ())
             .unwrap()
             .assume_valid()
     }
@@ -543,19 +549,19 @@ impl MineProtoJsonValue for ChatRoot {
 #[derive(Debug, Clone)]
 pub struct TrailingByteArray(pub Bytes);
 
-impl DeserializeSeqSimple<MineCodec, ()> for TrailingByteArray {
-    type SimpleSummary = ();
-    type SimpleView<'a> = &'a [u8];
+impl SeqDecoderSimple<TrailingByteArray, MineCodec, ()> for OurDecoders {
+    type Summary = ();
+    type View<'a> = &'a [u8];
 
-    fn reify_view_simple(view: &Self::SimpleView<'_>) -> Self {
-        Self(Bytes::from(Vec::from(*view)))
+    fn reify_view(view: &Self::View<'_>) -> TrailingByteArray {
+        TrailingByteArray(Bytes::from(Vec::from(*view)))
     }
 
-    fn decode_simple<'a>(
+    fn decode<'a>(
         _bind: [&'a (); 0],
         cursor: &mut ByteCursor<'a>,
         _args: &mut (),
-    ) -> anyhow::Result<Self::SimpleView<'a>> {
+    ) -> anyhow::Result<Self::View<'a>> {
         let remaining = cursor.remaining();
         cursor.advance_remaining();
         Ok(remaining)
@@ -585,20 +591,27 @@ impl SerializeInto<MineCodec, TrailingByteArray, ()> for &'_ [u8] {
 }
 
 // Option
-impl<T, A> DeserializeSeq<MineCodec, (A,)> for Option<T>
+impl<T, A> DecodeSeq<MineCodec, A> for Option<T>
 where
-    T: DeserializeSeq<MineCodec, A>,
+    T: DecodeSeqExt<MineCodec, A>,
+{
+    type Decoder = OurDecoders;
+}
+
+impl<T, A> SeqDecoderFull<Option<T>, MineCodec, A> for OurDecoders
+where
+    T: DecodeSeqExt<MineCodec, A>,
 {
     type Summary = (Option<T::Summary>, usize);
     type View<'a> = Option<T::View<'a>>;
 
-    fn reify_view(view: &Self::View<'_>) -> Self {
+    fn reify_view(view: &Self::View<'_>) -> Option<T> {
         view.as_ref().map(|view| T::reify_view(view))
     }
 
-    fn summarize(cursor: &mut ByteCursor, args: &mut (A,)) -> anyhow::Result<Self::Summary> {
+    fn summarize(cursor: &mut ByteCursor, args: &mut A) -> anyhow::Result<Self::Summary> {
         if bool::decode(cursor, ())? {
-            Ok((Some(T::summarize(cursor, &mut args.0)?), cursor.pos()))
+            Ok((Some(T::summarize(cursor, args)?), cursor.pos()))
         } else {
             Ok((None, cursor.pos()))
         }
@@ -607,7 +620,7 @@ where
     unsafe fn view<'a>(
         summary: &'a Self::Summary,
         mut cursor: ByteCursor<'a>,
-        args: (A,),
+        args: A,
     ) -> Self::View<'a> {
         // Skip the boolean field
         cursor.advance(1);
@@ -616,54 +629,16 @@ where
         summary
             .0
             .as_ref()
-            .map(|summary| T::view(summary, cursor, args.0))
+            .map(|summary| T::view(summary, cursor, args))
     }
 
     fn skip(
         summary: &Self::Summary,
         _skip_to_start: impl Fn(&mut ByteCursor),
         cursor: &mut ByteCursor,
-        _args: &mut (A,),
+        _args: &mut A,
     ) {
         cursor.set_pos(summary.1);
-    }
-}
-
-impl<T> DeserializeSeq<MineCodec, ()> for Option<T>
-where
-    T: DeserializeSeq<MineCodec, ()>,
-{
-    type Summary = (Option<T::Summary>, usize);
-    type View<'a> = Option<T::View<'a>>;
-
-    fn reify_view(view: &Self::View<'_>) -> Self {
-        view.as_ref().map(|view| T::reify_view(view))
-    }
-
-    fn summarize(cursor: &mut ByteCursor, _args: &mut ()) -> anyhow::Result<Self::Summary> {
-        <Option<T> as DeserializeSeq<MineCodec, ((),)>>::summarize(cursor, &mut ((),))
-    }
-
-    unsafe fn view<'a>(
-        summary: &'a Self::Summary,
-        cursor: ByteCursor<'a>,
-        _args: (),
-    ) -> Self::View<'a> {
-        <Option<T> as DeserializeSeq<MineCodec, ((),)>>::view(summary, cursor, ((),))
-    }
-
-    fn skip(
-        summary: &Self::Summary,
-        skip_to_start: impl Fn(&mut ByteCursor),
-        cursor: &mut ByteCursor,
-        _args: &mut (),
-    ) {
-        <Option<T> as DeserializeSeq<MineCodec, ((),)>>::skip(
-            summary,
-            skip_to_start,
-            cursor,
-            &mut ((),),
-        )
     }
 }
 
