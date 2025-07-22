@@ -1,0 +1,9 @@
+[package]
+name = "raft-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1.10.1"
+raft-utils = { version = "0.1.0", path = "../raft-utils" }
+thiserror = "2.0.12"
