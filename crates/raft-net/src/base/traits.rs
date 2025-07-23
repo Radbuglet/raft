@@ -1,20 +1,91 @@
 use std::{
     borrow::Cow,
-    collections::{VecDeque, vec_deque},
     error::Error,
     fmt::{self, Write},
 };
 
+use bytes::{Buf, BufMut, Bytes};
 use raft_utils::ctfe::format::CtfeFormatter;
 
-// === Encode === //
+// === Serde === //
 
-pub trait Encode<C: EncodeCursor, A = ()> {
-    fn encode(&self, cursor: &mut C, args: A);
+pub trait Serde<A = ()>: Sized {
+    fn decode_cx(cursor: &mut impl Buf, args: A) -> Result<Self, DecodeError>;
+
+    fn encode_cx(&self, cursor: &mut impl BufMut, args: A);
+
+    fn decode(cursor: &mut impl Buf) -> Result<Self, DecodeError>
+    where
+        A: Default,
+    {
+        Self::decode_cx(cursor, A::default())
+    }
+
+    fn encode(&self, cursor: &mut impl BufMut)
+    where
+        A: Default,
+    {
+        self.encode_cx(cursor, A::default());
+    }
 }
 
-pub trait EncodeCursor: Sized {
-    fn write_slice(&mut self, data: &[u8]);
+impl<const N: usize> Serde for [u8; N] {
+    fn decode_cx(cursor: &mut impl Buf, _args: ()) -> Result<Self, DecodeError> {
+        DecodeError::kinded("fixed-size byte array", || {
+            let mut arr = [0; N];
+
+            if cursor.try_copy_to_slice(&mut arr).is_err() {
+                return Err(DecodeError::new_static(
+                    const {
+                        const {
+                            let mut f = CtfeFormatter::<64>::new();
+
+                            f.write_str("not enough data to consume ");
+                            f.write_u128(N as u128);
+                            f.write_str(" byte");
+                            if N != 1 {
+                                f.write_str("s");
+                            }
+                            f.write_str(" from the section.");
+
+                            f
+                        }
+                        .finish()
+                    },
+                ));
+            }
+
+            Ok(arr)
+        })
+    }
+
+    fn encode_cx(&self, cursor: &mut impl BufMut, _args: ()) {
+        cursor.put_slice(self);
+    }
+}
+
+impl Serde<usize> for Bytes {
+    fn decode_cx(cursor: &mut impl Buf, len: usize) -> Result<Self, DecodeError> {
+        DecodeError::kinded("dynamically-size byte array", || {
+            if len > cursor.remaining() {
+                return Err(DecodeError::new_string(format!(
+                    "expected buffer of {} byte{} but only has {} byte{} remaining",
+                    len,
+                    if len != 1 { "s" } else { "" },
+                    cursor.remaining(),
+                    if cursor.remaining() != 1 { "s" } else { "" },
+                )));
+            }
+
+            Ok(cursor.copy_to_bytes(len))
+        })
+    }
+
+    fn encode_cx(&self, cursor: &mut impl BufMut, len: usize) {
+        assert_eq!(self.len(), len);
+
+        cursor.put_slice(self);
+    }
 }
 
 // === DecodeError === //
@@ -101,10 +172,6 @@ impl DecodeError {
         Self::new_cow(Cow::Owned(message.into()))
     }
 
-    pub fn new_fmt(message: impl fmt::Display) -> Self {
-        Self::new_cow(Cow::Owned(message.to_string()))
-    }
-
     pub fn set_kind(&mut self, kind: &'static str) {
         self.item_kind = Some(kind);
     }
@@ -135,87 +202,5 @@ impl DecodeError {
         f: impl FnOnce() -> Result<R, DecodeError>,
     ) -> Result<R, DecodeError> {
         f().map_err(|v| v.with_path(scope))
-    }
-}
-
-// === Decode === //
-
-pub trait Decode<C: DecodeCursor, A = ()>: Sized {
-    fn decode(cursor: &mut C, _args: A) -> Result<Self, DecodeError>;
-}
-
-pub trait DecodeCursor: Sized {
-    fn read<const N: usize>(&mut self) -> Result<[u8; N], DecodeError>;
-
-    fn remaining(&self) -> usize;
-
-    fn is_done(&self) -> bool {
-        self.remaining() == 0
-    }
-
-    fn finish(&self) -> Result<(), DecodeError> {
-        if !self.is_done() {
-            let len = self.remaining();
-
-            return Err(DecodeError::new_fmt(format_args!(
-                "expected end of buffer but {len} byte{} remaining",
-                if len == 1 { " is" } else { "s are" },
-            )));
-        }
-
-        Ok(())
-    }
-}
-
-pub trait ContiguousDecodeCursor: DecodeCursor {
-    type Slice: AsRef<[u8]>;
-
-    fn read_slice(&mut self, len: usize) -> Result<Self::Slice, DecodeError>;
-
-    fn advance(&mut self, len: usize) -> Result<(), DecodeError>;
-}
-
-// === FrameCursor === //
-
-#[derive(Debug)]
-pub struct FrameCursor<'a> {
-    cursor: vec_deque::Iter<'a, u8>,
-}
-
-impl<'a> FrameCursor<'a> {
-    pub fn new(queue: &'a VecDeque<u8>) -> Self {
-        Self {
-            cursor: queue.iter(),
-        }
-    }
-}
-
-impl DecodeCursor for FrameCursor<'_> {
-    fn read<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
-        let err = const {
-            const {
-                let mut fmt = CtfeFormatter::<48>::new();
-                fmt.write_str("buffer not large enough to decode ");
-                fmt.write_u128(N as u128);
-                fmt.write_str(" byte");
-
-                if N != 1 {
-                    fmt.write_char('s');
-                }
-
-                fmt
-            }
-            .finish()
-        };
-
-        if self.remaining() < N {
-            return Err(DecodeError::new_static(err));
-        }
-
-        todo!()
-    }
-
-    fn remaining(&self) -> usize {
-        self.cursor.len()
     }
 }

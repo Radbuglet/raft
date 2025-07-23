@@ -1,24 +1,32 @@
-use super::traits::{Decode, DecodeCursor, DecodeError, Encode, EncodeCursor};
+use std::{fmt, ops::Deref, str::Utf8Error};
+
+use super::traits::{DecodeError, Serde};
+
+use bytes::{Buf, BufMut, Bytes};
 
 // === Integers === //
 
 macro_rules! impl_int_serde {
     ($($ty:ty),* $(,)?) => {$(
-        impl<C: DecodeCursor> Decode<C> for $ty {
-            fn decode(cursor: &mut C, _args: ()) -> Result<Self, DecodeError> {
+        impl Serde for $ty {
+            fn decode_cx(cursor: &mut impl Buf, _args: ()) -> Result<Self, DecodeError> {
                 DecodeError::kinded(concat!("`", stringify!($ty), "`"), || {
-                    cursor.read().map(<$ty>::from_be_bytes)
+                    Serde::decode(cursor).map(<$ty>::from_be_bytes)
                 })
+            }
+
+            fn encode_cx(&self, cursor: &mut impl BufMut, _args: ()) {
+                self.to_be_bytes().encode(cursor);
             }
         }
     )*};
 }
 
-impl_int_serde!(u8, i8, u16, i16, u32, i32, i64, f32, f64);
+impl_int_serde!(u8, i8, u16, i16, u32, i32, u64, i64, f32, f64);
 
-impl<C: DecodeCursor> Decode<C> for bool {
-    fn decode(cursor: &mut C, _args: ()) -> Result<Self, DecodeError> {
-        DecodeError::kinded("boolean", || match u8::decode(cursor, ())? {
+impl Serde for bool {
+    fn decode_cx(cursor: &mut impl Buf, _args: ()) -> Result<Self, DecodeError> {
+        DecodeError::kinded("boolean", || match u8::decode(cursor)? {
             0x01 => Ok(true),
             0x00 => Ok(false),
             _ => Err(DecodeError::new_static(
@@ -26,13 +34,11 @@ impl<C: DecodeCursor> Decode<C> for bool {
             )),
         })
     }
-}
 
-impl<C: EncodeCursor> Encode<C> for bool {
-    fn encode(&self, cursor: &mut C, _args: ()) {
+    fn encode_cx(&self, cursor: &mut impl BufMut, _args: ()) {
         match self {
-            true => cursor.write_slice(&[0x01]),
-            false => cursor.write_slice(&[0x00]),
+            true => cursor.put_u8(0x01),
+            false => cursor.put_u8(0x00),
         }
     }
 }
@@ -45,14 +51,14 @@ const CONTINUE_BIT: u8 = 0x80;
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct VarInt(pub i32);
 
-impl<C: DecodeCursor> Decode<C> for VarInt {
-    fn decode(cursor: &mut C, _args: ()) -> Result<Self, DecodeError> {
+impl Serde for VarInt {
+    fn decode_cx(cursor: &mut impl Buf, _args: ()) -> Result<Self, DecodeError> {
         DecodeError::kinded("VarInt", || {
             let mut value = 0u32;
             let mut position = 0;
 
             loop {
-                let byte = u8::decode(cursor, ())?;
+                let byte = u8::decode(cursor)?;
                 value |= ((byte & SEGMENT_BITS) as u32) << position;
 
                 if (byte & CONTINUE_BIT) == 0 {
@@ -69,18 +75,16 @@ impl<C: DecodeCursor> Decode<C> for VarInt {
             Ok(VarInt(value as i32))
         })
     }
-}
 
-impl<C: EncodeCursor> Encode<C> for VarInt {
-    fn encode(&self, cursor: &mut C, _args: ()) {
+    fn encode_cx(&self, cursor: &mut impl BufMut, _args: ()) {
         let mut value = self.0 as u32;
 
         loop {
             if value & !(SEGMENT_BITS as u32) == 0 {
-                cursor.write_slice(&[value as u8]);
+                (value as u8).encode(cursor);
             }
 
-            cursor.write_slice(&[value as u8 & SEGMENT_BITS | CONTINUE_BIT]);
+            (value as u8 & SEGMENT_BITS | CONTINUE_BIT).encode(cursor);
 
             value >>= 7;
         }
@@ -90,14 +94,14 @@ impl<C: EncodeCursor> Encode<C> for VarInt {
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct VarLong(pub i64);
 
-impl<C: DecodeCursor> Decode<C> for VarLong {
-    fn decode(cursor: &mut C, _args: ()) -> Result<Self, DecodeError> {
+impl Serde for VarLong {
+    fn decode_cx(cursor: &mut impl Buf, _args: ()) -> Result<Self, DecodeError> {
         DecodeError::kinded("VarLong", || {
             let mut value = 0u64;
             let mut position = 0;
 
             loop {
-                let byte = u8::decode(cursor, ())?;
+                let byte = u8::decode(cursor)?;
                 value |= ((byte & SEGMENT_BITS) as u64) << position;
 
                 if (byte & CONTINUE_BIT) == 0 {
@@ -114,18 +118,16 @@ impl<C: DecodeCursor> Decode<C> for VarLong {
             Ok(VarLong(value as i64))
         })
     }
-}
 
-impl<C: EncodeCursor> Encode<C> for VarLong {
-    fn encode(&self, cursor: &mut C, _args: ()) {
+    fn encode_cx(&self, cursor: &mut impl BufMut, _args: ()) {
         let mut value = self.0 as u64;
 
         loop {
             if value & !(SEGMENT_BITS as u64) == 0 {
-                cursor.write_slice(&[value as u8]);
+                (value as u8).encode(cursor);
             }
 
-            cursor.write_slice(&[value as u8 & SEGMENT_BITS | CONTINUE_BIT]);
+            (value as u8 & SEGMENT_BITS | CONTINUE_BIT).encode(cursor);
 
             value >>= 7;
         }
@@ -134,7 +136,115 @@ impl<C: EncodeCursor> Encode<C> for VarLong {
 
 // === String === //
 
-// TODO: String
+#[derive(Clone, Hash, Eq, PartialEq)]
+pub struct BufString(Bytes);
+
+impl fmt::Debug for BufString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl fmt::Display for BufString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl BufString {
+    pub fn try_new(data: Bytes) -> Result<Self, Utf8Error> {
+        _ = std::str::from_utf8(&data)?;
+
+        Ok(Self(data))
+    }
+
+    pub fn into_buf(self) -> Bytes {
+        self.0
+    }
+
+    pub fn as_buf(&self) -> &Bytes {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        unsafe { std::str::from_utf8_unchecked(&self.0) }
+    }
+}
+
+impl AsRef<str> for BufString {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for BufString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl Serde<usize> for BufString {
+    fn decode_cx(cursor: &mut impl Buf, max_len: usize) -> Result<Self, DecodeError> {
+        DecodeError::kinded("string", || {
+            let VarInt(byte_len) = VarInt::decode(cursor)?;
+
+            let Ok(byte_len) = usize::try_from(byte_len) else {
+                return Err(DecodeError::new_static("length was negative"));
+            };
+
+            if byte_len > max_len * 3 {
+                return Err(DecodeError::new_string(format!(
+                    "UTF-8 length of {byte_len} necessarily goes beyond UTF-16 limit of {max_len}"
+                )));
+            }
+
+            let utf_8 = Bytes::decode_cx(cursor, byte_len)?;
+            let Ok(utf_8) = Self::try_new(utf_8) else {
+                return Err(DecodeError::new_static("buffer contained invalid UTF-8"));
+            };
+
+            if utf16_codepoints(&utf_8, byte_len) > byte_len {
+                return Err(DecodeError::new_string(format!(
+                    "string buffer contains more than {max_len} UTF-16 codepoints"
+                )));
+            }
+
+            Ok(utf_8)
+        })
+    }
+
+    fn encode_cx(&self, cursor: &mut impl BufMut, _max_len: usize) {
+        VarInt(self.len() as i32).encode(cursor);
+
+        self.0.encode(cursor);
+    }
+}
+
+fn utf16_codepoints(text: &str, stop_counting_after: usize) -> usize {
+    let mut counter = 0;
+
+    for ch in text.chars() {
+        counter += 1;
+
+        if ch as u32 > 0xFFFF {
+            counter += 1
+        }
+
+        if counter > stop_counting_after {
+            break;
+        }
+    }
+
+    counter
+}
+
+// === NBT === //
+
+// TODO: NBT
+
+// === Remaining === //
 
 // TODO: Text Component
 
@@ -142,17 +252,11 @@ impl<C: EncodeCursor> Encode<C> for VarLong {
 
 // TODO: Identifier
 
-// TODO: VarInt
-
-// TODO: VarLong
-
 // TODO: Entity Metadata
 
 // TODO: Slot
 
 // TODO: Hashed Slot
-
-// TODO: NBT
 
 // TODO: Position
 
